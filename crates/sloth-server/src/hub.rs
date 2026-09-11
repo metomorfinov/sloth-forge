@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 #[derive(Debug, Deserialize, Default)]
@@ -127,6 +127,171 @@ pub async fn handle_active_downloads(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct HfTreeItem {
+    #[serde(rename = "type")]
+    entry_type: String,
+    path: String,
+    size: Option<u64>,
+}
+
+pub async fn fetch_hf_tree_variants(
+    state: &Arc<AppState>,
+    repo_id: &str,
+) -> Option<serde_json::Value> {
+    // 1. Check in-memory cache (10 min TTL)
+    {
+        let cache = state.gguf_variants_cache.read().await;
+        if let Some((ts, val)) = cache.get(repo_id) {
+            if ts.elapsed() < Duration::from_secs(600) {
+                return Some(val.clone());
+            }
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .ok()?;
+
+    let url = format!("https://huggingface.co/api/models/{}/tree/main?recursive=true", repo_id);
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "sloth-forge/0.1.0")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let items: Vec<HfTreeItem> = resp.json().await.ok()?;
+
+    let mut has_vision = false;
+    let mut gguf_files: Vec<(String, u64)> = Vec::new();
+
+    for item in items {
+        if item.entry_type == "file" {
+            let p = item.path;
+            let sz = item.size.unwrap_or(0);
+            if p.contains("mmproj-") {
+                has_vision = true;
+            } else if p.ends_with(".gguf") {
+                gguf_files.push((p, sz));
+            }
+        }
+    }
+
+    if gguf_files.is_empty() {
+        return None;
+    }
+
+    // Known quant patterns in descending specificity
+    const KNOWN_QUANTS: &[&str] = &[
+        "UD-Q8_K_XL", "UD-Q6_K_XL", "UD-Q5_K_XL", "UD-Q4_K_XL", "UD-Q3_K_XL", "UD-Q2_K_XL",
+        "UD-IQ4_XS", "UD-IQ3_XXS", "UD-IQ3_S", "UD-IQ2_XXS", "UD-IQ2_M", "UD-IQ1_S", "UD-IQ1_M",
+        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0",
+        "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0",
+        "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K_L", "Q2_K",
+        "IQ4_NL", "IQ4_XS", "IQ3_M", "IQ3_S", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XXS", "IQ1_M", "IQ1_S",
+        "BF16", "F16", "FP16",
+    ];
+
+    // Group files by quant: quant -> (quant, Vec<path>, total_bytes)
+    let mut groups: std::collections::BTreeMap<String, (String, Vec<String>, u64)> = std::collections::BTreeMap::new();
+
+    for (p, sz) in gguf_files {
+        let mut matched_quant: Option<&str> = None;
+        for &q in KNOWN_QUANTS {
+            if p.contains(q) {
+                matched_quant = Some(q);
+                break;
+            }
+        }
+
+        let quant = if let Some(q) = matched_quant {
+            q.to_string()
+        } else if p.contains('/') {
+            p.split('/').next().unwrap_or("Q4_K_M").to_string()
+        } else {
+            p.trim_end_matches(".gguf").to_string()
+        };
+
+        let group_key = quant.clone();
+        let entry = groups.entry(group_key).or_insert_with(|| (quant.clone(), Vec::new(), 0));
+        entry.1.push(p);
+        entry.2 += sz;
+    }
+
+    let mut sorted_keys: Vec<String> = groups.keys().cloned().collect();
+    sorted_keys.sort_by(|a, b| {
+        fn score(k: &str) -> usize {
+            if k == "Q4_K_M" || k == "UD-Q4_K_XL" { 0 }
+            else if k == "Q5_K_M" || k == "UD-Q5_K_XL" { 1 }
+            else if k == "Q8_0" || k == "UD-Q8_K_XL" { 2 }
+            else if k.starts_with("Q4_") || k.starts_with("UD-IQ4_") { 3 }
+            else if k.starts_with("Q5_") { 4 }
+            else if k.starts_with("Q3_") || k.starts_with("UD-Q3_") { 5 }
+            else if k.starts_with("Q6_") { 6 }
+            else { 10 }
+        }
+        score(a).cmp(&score(b))
+    });
+
+    let mut variants: Vec<serde_json::Value> = Vec::new();
+    let mut default_variant = "Q4_K_M".to_string();
+    let mut found_default = false;
+
+    for key in sorted_keys {
+        if let Some((quant, shard_paths, total_bytes)) = groups.remove(&key) {
+            let first_file = shard_paths.first().cloned().unwrap_or_default();
+            let is_downloaded = shard_paths.iter().all(|sp| {
+                let filename_only = sp.split('/').last().unwrap_or(sp);
+                state.models_dir.join(sp).exists() || state.models_dir.join(filename_only).exists()
+            });
+
+            // On RX 570 4GB: only recommend if total weights <= 3.2 GB
+            let is_recommended = total_bytes > 0 && total_bytes <= 3_200_000_000u64;
+            let display_label = if is_recommended {
+                format!("{} (Recommended)", quant)
+            } else {
+                quant.clone()
+            };
+
+            if !found_default {
+                default_variant = quant.clone();
+                found_default = true;
+            }
+
+            variants.push(serde_json::json!({
+                "filename": first_file,
+                "files": shard_paths,
+                "quant": quant,
+                "display_label": display_label,
+                "size_bytes": total_bytes,
+                "download_size_bytes": total_bytes,
+                "shard_count": shard_paths.len(),
+                "downloaded": is_downloaded
+            }));
+        }
+    }
+
+    let result = serde_json::json!({
+        "repo_id": repo_id,
+        "has_vision": has_vision,
+        "default_variant": default_variant,
+        "variants": variants
+    });
+
+    {
+        let mut cache = state.gguf_variants_cache.write().await;
+        cache.insert(repo_id.to_string(), (Instant::now(), result.clone()));
+    }
+
+    Some(result)
+}
+
 pub async fn handle_gguf_variants(
     State(state): State<Arc<AppState>>,
     Query(query): Query<RepoVariantsQuery>,
@@ -135,6 +300,12 @@ pub async fn handle_gguf_variants(
         .repo_id
         .unwrap_or_else(|| "unsloth/Llama-3.2-3B-Instruct-GGUF".to_string());
 
+    // 1. First attempt to fetch real variants from Hugging Face tree API
+    if let Some(real_val) = fetch_hf_tree_variants(&state, &repo_id).await {
+        return Json(real_val);
+    }
+
+    // 2. Offline / network fallback: accurate estimates based on architecture and parameter count
     let repo_lower = repo_id.to_lowercase();
     let is_llama = repo_lower.contains("llama-3.2-3b") || repo_id == "unsloth/Llama-3.2-3B-Instruct-GGUF";
 
@@ -148,7 +319,9 @@ pub async fn handle_gguf_variants(
         )
     } else {
         let repo_part = repo_id.split('/').last().unwrap_or(&repo_id);
-        let (q4_sz, q8_sz, rec) = if repo_lower.contains("70b") {
+        let (q4_sz, q8_sz, rec) = if repo_lower.contains("284b") || repo_lower.contains("deepseek-v4") || repo_lower.contains("deepseek") {
+            (155_000_000_000u64, 280_000_000_000u64, false)
+        } else if repo_lower.contains("70b") {
             (40_000_000_000u64, 75_000_000_000u64, false)
         } else if repo_lower.contains("32b") || repo_lower.contains("30b") || repo_lower.contains("glm-5") || repo_lower.contains("glm") {
             (20_000_000_000u64, 36_000_000_000u64, false)
@@ -159,7 +332,7 @@ pub async fn handle_gguf_variants(
         } else if repo_lower.contains("1b") || repo_lower.contains("0.5b") {
             (800_000_000u64, 1_500_000_000u64, true)
         } else {
-            (5_000_000_000u64, 9_000_000_000u64, false)
+            (2_500_000_000u64, 4_500_000_000u64, true)
         };
         (
             format!("{}-Q4_K_M.gguf", repo_part),
@@ -275,10 +448,27 @@ pub async fn handle_download_start(
         .unwrap_or("main")
         .to_string();
 
-    let total_bytes = if variant.contains("Q8_0") || filename.contains("Q8_0") {
-        3_800_000_000u64
-    } else {
-        2_023_751_680u64
+    let total_bytes = {
+        let cache = state.gguf_variants_cache.read().await;
+        cache.get(&repo_id).and_then(|(_, v)| {
+            v.get("variants")?.as_array()?.iter().find_map(|var| {
+                let v_quant = var.get("quant")?.as_str()?;
+                let v_fname = var.get("filename")?.as_str()?;
+                if v_quant == variant || v_fname == filename || filename.contains(v_quant) {
+                    var.get("size_bytes")?.as_u64()
+                } else {
+                    None
+                }
+            })
+        }).unwrap_or_else(|| {
+            if repo_id.to_lowercase().contains("deepseek") || repo_id.to_lowercase().contains("284b") {
+                155_000_000_000u64
+            } else if variant.contains("Q8_0") || filename.contains("Q8_0") {
+                3_800_000_000u64
+            } else {
+                2_023_751_680u64
+            }
+        })
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -309,7 +499,13 @@ pub async fn handle_download_start(
     tokio::spawn(async move {
         let _ = tokio::fs::create_dir_all(&models_dir).await;
         let target_file = models_dir.join(&filename_for_task);
+        if let Some(parent) = target_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
         let part_file = models_dir.join(format!("{}.part", filename_for_task));
+        if let Some(parent) = part_file.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
 
         let url = format!(
             "https://huggingface.co/{}/resolve/{}/{}",

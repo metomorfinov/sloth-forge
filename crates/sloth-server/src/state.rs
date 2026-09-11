@@ -286,6 +286,7 @@ pub struct AppState {
     pub vram_budget_mb: Arc<AtomicU64>,
     pub upload_limit_bytes: Arc<AtomicU64>,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
+    pub gguf_variants_cache: Arc<RwLock<std::collections::HashMap<String, (Instant, serde_json::Value)>>>,
 }
 
 impl AppState {
@@ -314,6 +315,7 @@ impl AppState {
             vram_budget_mb: Arc::new(AtomicU64::new(4096)),
             upload_limit_bytes: Arc::new(AtomicU64::new(10737418240)),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
+            gguf_variants_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 }
