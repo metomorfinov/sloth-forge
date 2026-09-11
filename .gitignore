@@ -1,0 +1,25 @@
+# Build artifacts
+target/
+build/
+*.o
+*.so
+*.a
+*.spv
+
+# Node & Frontend
+node_modules/
+dist/
+.vite/
+
+# Model checkpoints & large weights
+*.gguf
+*.safetensors
+*.bin
+checkpoints/
+data/raw/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
