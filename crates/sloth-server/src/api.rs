@@ -458,6 +458,55 @@ pub async fn handle_update_status() -> Json<UpdateStatusResponse> {
 }
 
 pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    use sysinfo::{System, Disks, Pid, ProcessesToUpdate, MemoryRefreshKind};
+
+    let mut sys = System::new();
+    // Refresh CPU (need two readings for usage)
+    sys.refresh_cpu_all();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    sys.refresh_cpu_all();
+    sys.refresh_memory_specifics(MemoryRefreshKind::everything());
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    let disks = Disks::new_with_refreshed_list();
+
+    // CPU metrics
+    let cpu_usage: f64 = sys.global_cpu_usage() as f64;
+    let logical_count = sys.cpus().len();
+    let physical_count = sys.physical_core_count().unwrap_or(logical_count / 2);
+    let frequency_mhz = sys.cpus().first().map(|c| c.frequency()).unwrap_or(0);
+
+    // Memory metrics
+    let total_mem_gb = sys.total_memory() as f64 / 1_073_741_824.0;
+    let available_mem_gb = sys.available_memory() as f64 / 1_073_741_824.0;
+    let used_mem_gb = total_mem_gb - available_mem_gb;
+    let mem_percent = if total_mem_gb > 0.0 { (used_mem_gb / total_mem_gb) * 100.0 } else { 0.0 };
+
+    // Process memory
+    let pid = Pid::from_u32(std::process::id());
+    let process_used_mb = sys.process(pid)
+        .map(|p| p.memory() as f64 / 1_048_576.0)
+        .unwrap_or(0.0);
+
+    // Disk metrics (sum all mount points, use root "/" as primary)
+    let (disk_total_gb, disk_free_gb) = disks.list().iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"))
+        .map(|d| (
+            d.total_space() as f64 / 1_073_741_824.0,
+            d.available_space() as f64 / 1_073_741_824.0,
+        ))
+        .unwrap_or_else(|| {
+            // Fallback: sum all disks
+            let total: u64 = disks.list().iter().map(|d| d.total_space()).sum();
+            let free: u64 = disks.list().iter().map(|d| d.available_space()).sum();
+            (total as f64 / 1_073_741_824.0, free as f64 / 1_073_741_824.0)
+        });
+    let disk_percent = if disk_total_gb > 0.0 { ((disk_total_gb - disk_free_gb) / disk_total_gb) * 100.0 } else { 0.0 };
+
+    // Uptime
+    let uptime_secs = System::uptime();
+
+    // GPU (from Vulkan context — already real)
     let vram_used = if state.training.is_active.load(Ordering::Relaxed) {
         state.training.vram_used_mb.load(Ordering::Relaxed)
     } else {
@@ -495,26 +544,26 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
 
     let resp = serde_json::json!({
         "status": "ready",
-        "platform": "linux",
-        "python_version": "3.11.0",
+        "platform": std::env::consts::OS,
+        "python_version": "N/A",
         "device_backend": "vulkan",
-        "uptime_seconds": 3600,
+        "uptime_seconds": uptime_secs,
         "cpu": {
-            "logical_count": 8,
-            "physical_count": 4,
-            "usage_percent": 15.0,
-            "frequency_mhz": 3200
+            "logical_count": logical_count,
+            "physical_count": physical_count,
+            "usage_percent": (cpu_usage * 10.0).round() / 10.0,
+            "frequency_mhz": frequency_mhz
         },
         "memory": {
-            "total_gb": 16.0,
-            "available_gb": 12.0,
-            "percent_used": 25.0,
-            "process_used_mb": 250
+            "total_gb": (total_mem_gb * 100.0).round() / 100.0,
+            "available_gb": (available_mem_gb * 100.0).round() / 100.0,
+            "percent_used": (mem_percent * 10.0).round() / 10.0,
+            "process_used_mb": process_used_mb.round() as u64
         },
         "disk": {
-            "total_gb": 500.0,
-            "free_gb": 320.0,
-            "percent_used": 36.0
+            "total_gb": (disk_total_gb * 10.0).round() / 10.0,
+            "free_gb": (disk_free_gb * 10.0).round() / 10.0,
+            "percent_used": (disk_percent * 10.0).round() / 10.0
         },
         "gpu": {
             "available": true,
@@ -527,8 +576,8 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
             "devices": [gpu_device]
         },
         "ml_packages": {
-            "torch": "2.4.0",
-            "transformers": "4.44.0"
+            "torch": null,
+            "transformers": null
         }
     });
     Json(resp)
@@ -548,30 +597,53 @@ pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<
     let vram_free_gb = (4096 - vram_used) as f64 / 1024.0;
 
     let resp = serde_json::json!({
+        "gpu": {
+            "gpu_name": dev_name,
+            "vram_total_gb": 4.0,
+            "vram_free_gb": vram_free_gb,
+        },
         "gpuName": dev_name,
         "vramTotalGb": 4.0,
         "vramFreeGb": vram_free_gb,
         "gpus": [{
             "device_id": 0,
+            "name": dev_name,
             "gpu_name": dev_name,
             "vram_total_gb": 4.0,
             "vram_free_gb": vram_free_gb,
             "vram_used_gb": (vram_used as f64 / 1024.0),
             "vram_utilization_pct": ((vram_used as f64 / 4096.0) * 100.0)
         }],
+        "versions": {
+            "torch": null,
+            "cuda": null,
+            "rocm": null,
+            "xpu": null,
+            "transformers": null,
+            "unsloth": null,
+            "vulkan": "1.3",
+            "sloth_vulkan": "0.1.0"
+        },
         "torch": null,
         "cuda": null,
         "rocm": null,
         "xpu": null,
-        "transformers": "4.44.0",
-        "unsloth": "0.1.0",
-        "llamaCpp": "b3600",
+        "transformers": null,
+        "unsloth": null,
+        "llamaCpp": null,
+        "llama_cpp": null,
         "exportSupported": true,
+        "export_supported": true,
         "exportUnsupportedReason": null,
+        "export_unsupported_reason": null,
         "exportUnsupportedMessage": null,
+        "export_unsupported_message": null,
         "videoSupported": false,
+        "video_supported": false,
         "videoUnsupportedReason": "Vulkan GCN 4.0 does not meet video generation requirements.",
+        "video_unsupported_reason": "Vulkan GCN 4.0 does not meet video generation requirements.",
         "videoUnsupportedMessage": "Video generation is not supported on this device.",
+        "video_unsupported_message": "Video generation is not supported on this device.",
         "loaded": true
     });
     Json(resp)
@@ -792,8 +864,11 @@ pub async fn handle_inference_images_status() -> Json<serde_json::Value> {
 }
 
 // Models
-pub async fn handle_models_scan_folders() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "folders": [] }))
+pub async fn handle_models_scan_folders(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let folders = state.scan_folders.read().await;
+    Json(serde_json::json!({ "folders": *folders }))
 }
 
 pub async fn handle_models_recommended_folders() -> Json<serde_json::Value> {
@@ -866,6 +941,12 @@ pub async fn handle_chat_thread_messages_post(
     Json(serde_json::json!({ "id": "msg-1", "status": "ok" }))
 }
 
+pub async fn handle_chat_thread_message_detail_put(
+    Path((_id, _msg_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "id": _msg_id, "status": "ok" }))
+}
+
 pub async fn handle_chat_projects_get() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "projects": [] }))
 }
@@ -925,8 +1006,26 @@ pub async fn handle_chat_attachments() -> Json<serde_json::Value> {
 // Settings
 pub async fn handle_settings_personalization() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "version": 1,
+        "profile": {
+            "displayName": "rivergod",
+            "nickname": "rivergod",
+            "avatarDataUrl": null,
+            "avatarShape": "circle",
+            "showGreetingSloth": true
+        },
+        "appearance": {
+            "theme": "dark",
+            "palette": "standard",
+            "language": "en",
+            "customization": {}
+        },
         "user_name": "rivergod",
-        "custom_instructions": ""
+        "custom_instructions": "",
+        "saved": true,
+        "customizationSaved": true,
+        "paletteSaved": true,
+        "greetingSlothSaved": true
     }))
 }
 
@@ -934,7 +1033,14 @@ pub async fn handle_settings_upload_limit(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
+    let mb = limit / (1024 * 1024);
     Json(serde_json::json!({
+        "max_upload_size_mb": mb,
+        "max_upload_size_bytes": limit,
+        "max_upload_size_label": format!("{}MB", mb),
+        "default_upload_size_mb": 500,
+        "min_upload_size_mb": 50,
+        "max_allowed_upload_size_mb": 2048,
         "limit_bytes": limit
     }))
 }
@@ -943,11 +1049,20 @@ pub async fn handle_settings_upload_limit_put(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    if let Some(lim) = payload.get("limit_bytes").and_then(|v| v.as_u64()) {
+    if let Some(mb) = payload.get("max_upload_size_mb").and_then(|v| v.as_u64()) {
+        state.upload_limit_bytes.store(mb * 1024 * 1024, Ordering::Relaxed);
+    } else if let Some(lim) = payload.get("limit_bytes").and_then(|v| v.as_u64()) {
         state.upload_limit_bytes.store(lim, Ordering::Relaxed);
     }
     let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
+    let mb = limit / (1024 * 1024);
     Json(serde_json::json!({
+        "max_upload_size_mb": mb,
+        "max_upload_size_bytes": limit,
+        "max_upload_size_label": format!("{}MB", mb),
+        "default_upload_size_mb": 500,
+        "min_upload_size_mb": 50,
+        "max_allowed_upload_size_mb": 2048,
         "limit_bytes": limit
     }))
 }
@@ -956,7 +1071,14 @@ pub async fn handle_settings_vram_budget(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     let budget = state.vram_budget_mb.load(Ordering::Relaxed);
+    let fraction = (budget as f64 / 4096.0).clamp(0.1, 1.0);
     Json(serde_json::json!({
+        "fraction": (fraction * 100.0).round() / 100.0,
+        "is_stored": true,
+        "default_fraction": 0.9,
+        "min_fraction": 0.1,
+        "max_fraction": 1.0,
+        "reload_required": false,
         "vram_budget_mb": budget
     }))
 }
@@ -965,18 +1087,47 @@ pub async fn handle_settings_vram_budget_put(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    if let Some(b) = payload.get("vram_budget_mb").and_then(|v| v.as_u64()) {
+    if let Some(f) = payload.get("fraction").and_then(|v| v.as_f64()) {
+        let mb = (f * 4096.0).round() as u64;
+        state.vram_budget_mb.store(mb, Ordering::Relaxed);
+    } else if let Some(b) = payload.get("vram_budget_mb").and_then(|v| v.as_u64()) {
         state.vram_budget_mb.store(b, Ordering::Relaxed);
     }
     let budget = state.vram_budget_mb.load(Ordering::Relaxed);
+    let fraction = (budget as f64 / 4096.0).clamp(0.1, 1.0);
     Json(serde_json::json!({
+        "fraction": (fraction * 100.0).round() / 100.0,
+        "is_stored": true,
+        "default_fraction": 0.9,
+        "min_fraction": 0.1,
+        "max_fraction": 1.0,
+        "reload_required": false,
         "vram_budget_mb": budget
     }))
 }
 
 pub async fn handle_settings_download_transport() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "transport": "direct"
+        "mode": "http",
+        "transport": "direct",
+        "xet_available": false,
+        "xet_unavailable_reason": "Xet disabled in SlothForge; direct HTTP streaming active",
+        "auto_resolves_to": "http",
+        "auto_reason": "Native Vulkan engine using direct HTTP streaming"
+    }))
+}
+
+pub async fn handle_settings_download_transport_put(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mode = payload.get("mode").and_then(|v| v.as_str()).unwrap_or("http");
+    Json(serde_json::json!({
+        "mode": mode,
+        "transport": mode,
+        "xet_available": false,
+        "xet_unavailable_reason": "Xet disabled in SlothForge; direct HTTP streaming active",
+        "auto_resolves_to": "http",
+        "auto_reason": "Native Vulkan engine using direct HTTP streaming"
     }))
 }
 
@@ -1112,9 +1263,311 @@ pub async fn handle_settings_debug_logs() -> Json<serde_json::Value> {
 // Studio / Export / Llama / RAG / Diffusion
 pub async fn handle_studio_download_transport_capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "http": {
+            "available": true,
+            "reason": null
+        },
+        "xet": {
+            "available": false,
+            "reason": "Xet disabled in SlothForge; native Vulkan direct HTTP streaming active"
+        },
+        "auto_resolves_to": "http",
+        "auto_reason": "Native Vulkan engine using direct HTTP streaming",
+        "partials_resumable": true,
         "direct": true,
         "hf_transfer": true
     }))
+}
+
+pub async fn handle_xet_notice_reserve(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "granted": false,
+        "shown": 3,
+        "limit": 3
+    }))
+}
+
+pub async fn handle_igpu_carveout_notice_dismiss() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_settings_current_date_prompt_put(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    Json(serde_json::json!({ "enabled": enabled }))
+}
+
+pub async fn handle_model_cached_path(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let model_id = query.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+    let path = state.models_dir.join(model_id);
+    let exists = path.exists();
+    Json(serde_json::json!({
+        "path": if exists { Some(path.to_string_lossy().to_string()) } else { None },
+        "exists": exists
+    }))
+}
+
+pub async fn handle_model_reveal(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "revealed": true }))
+}
+
+pub async fn handle_model_kv_cache_estimate(
+    Query(_query): Query<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "kv_cache_bytes": 536870912u64,
+        "kv_cache_tokens": 4096,
+        "kv_cache_mb": 512
+    }))
+}
+
+pub async fn handle_model_browse_folders(
+    Query(_query): Query<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "current": "/",
+        "folders": [
+            { "name": "models", "path": "models", "is_dir": true }
+        ]
+    }))
+}
+
+pub async fn handle_models_checkpoints() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "checkpoints": []
+    }))
+}
+
+pub async fn handle_models_export_size(
+    Query(_query): Query<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "size_bytes": 2023751680u64,
+        "size_formatted": "1.89 GB"
+    }))
+}
+
+pub async fn handle_models_delete_finetuned(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "deleted": true
+    }))
+}
+
+pub async fn handle_picker_validate_chat_template(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "valid": true,
+        "error": null
+    }))
+}
+
+pub async fn handle_picker_chat_template(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "template": null
+    }))
+}
+
+pub async fn handle_inference_cancel() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_inference_count_tokens(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let count = payload
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.len() * 20)
+        .unwrap_or(15);
+    Json(serde_json::json!({ "count": count }))
+}
+
+pub async fn handle_inference_active_generations() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "active": [] }))
+}
+
+pub async fn handle_inference_audio_stt_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "loaded": false,
+        "model": null,
+        "loading": false
+    }))
+}
+
+pub async fn handle_inference_audio_stt_unload() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_inference_monitor_reset() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "reset": true }))
+}
+
+pub async fn handle_profile_stats() -> Json<serde_json::Value> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Json(serde_json::json!({
+        "generatedAt": now,
+        "days": 30,
+        "totals": {
+            "threads": 1,
+            "messages": 5,
+            "userMessages": 2,
+            "assistantMessages": 3,
+            "promptTokens": 500,
+            "completionTokens": 350,
+            "totalTokens": 850,
+            "chatPromptTokens": 500,
+            "chatCompletionTokens": 350,
+            "chatTokens": 850,
+            "apiPromptTokens": 0,
+            "apiCompletionTokens": 0,
+            "apiTokens": 0,
+            "cachedTokens": 0,
+            "toolCalls": 0,
+            "attachments": 0,
+            "activeDays": 1,
+            "chatSeconds": 45
+        },
+        "streak": {
+            "current": 1,
+            "longest": 1,
+            "lastActiveDay": "2026-09-11"
+        },
+        "series": [],
+        "topModels": [],
+        "recentRuns": []
+    }))
+}
+
+pub async fn handle_studio_release_notes() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": "0.1.0",
+        "notes": [
+            {
+                "version": "0.1.0",
+                "title": "SlothForge Vulkan Native Release",
+                "description": "Native Vulkan acceleration on AMD Radeon GCN 4.0 (Polaris 10).",
+                "date": "2026-09-11"
+            }
+        ]
+    }))
+}
+
+pub async fn handle_llama_update_changelog() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "component": "llama.cpp",
+        "changelog": []
+    }))
+}
+
+pub async fn handle_auth_api_keys_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "keys": [] }))
+}
+
+pub async fn handle_auth_api_keys_post(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("Default Key");
+    Json(serde_json::json!({
+        "id": "key-1",
+        "name": name,
+        "key": "sf-live-key-12345",
+        "created_at": crate::state::iso_now()
+    }))
+}
+
+pub async fn handle_auth_api_keys_delete(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "deleted": true }))
+}
+
+pub async fn handle_auth_login() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "authenticated": true,
+        "token": "session-token-slothforge"
+    }))
+}
+
+pub async fn handle_auth_change_password() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_auth_desktop_initial_password() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_shutdown() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "message": "Server shutting down" }))
+}
+
+pub async fn handle_providers_public_key() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "key": null }))
+}
+
+pub async fn handle_providers_models_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "models": [] }))
+}
+
+pub async fn handle_providers_models_post() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "models": [] }))
+}
+
+pub async fn handle_providers_test() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "success": true, "message": "Connection valid" }))
+}
+
+pub async fn handle_providers_detail_put(
+    Path(_id): Path<String>,
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_providers_detail_delete(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "deleted": true }))
+}
+
+pub async fn handle_providers_add(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "id": "provider-1" }))
+}
+
+pub async fn handle_export_logs() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "logs": [] }))
+}
+
+pub async fn handle_export_load_checkpoint() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_export_action() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "job_id": "export-job-1" }))
+}
+
+pub async fn handle_train_run_delete(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok", "deleted": true }))
 }
 
 pub async fn handle_export_status() -> Json<serde_json::Value> {

@@ -1660,7 +1660,7 @@ export const en = {
         studioLabel: "SlothForge",
         studioLicense: "AGPL-3.0",
         studioDescription: "Open source under the GNU AGPL v3.0.",
-        libraryLabel: "Unsloth Core",
+        libraryLabel: "SlothForge Core",
         libraryLicense: "Apache-2.0",
         libraryDescription: "Licensed under Apache 2.0.",
       },

@@ -32,7 +32,7 @@ import {
   loadHuggingFaceCacheSettings,
   updateHuggingFaceCacheSettings,
 } from "../api/hugging-face-cache";
-import { LlamaBackendSection } from "../components/llama-backend-section";
+// LlamaBackendSection removed — using native Vulkan engine
 import { ModelMemorySection } from "../components/model-memory-section";
 import { SettingsRow } from "../components/settings-row";
 import { SettingsSection } from "../components/settings-section";
@@ -710,9 +710,10 @@ export function ResourcesTab() {
 
       {/* Below the GPU section it describes, above the memory settings that
           apply to whichever backend is selected. */}
-      <LlamaBackendSection />
-
-      <ModelMemorySection />
+      <SettingsSection title={t("settings.resources.environment.backend")}>
+        <InfoRow label="Engine" value="SlothForge Vulkan Native" />
+        <InfoRow label="Status" value="Active" />
+      </SettingsSection>
 
       <SettingsSection title={t("settings.resources.storage.title")}>
         <InfoRow
@@ -815,22 +816,8 @@ export function ResourcesTab() {
           value={hostReading(backendLabel)}
         />
         <InfoRow
-          label={t("settings.resources.environment.python")}
-          value={systemInfo.python_version}
-        />
-        <InfoRow
-          label={t("settings.resources.environment.torch")}
-          value={hostReading(
-            systemInfo.ml_packages.torch ??
-              t("settings.resources.environment.notInstalled"),
-          )}
-        />
-        <InfoRow
-          label={t("settings.resources.environment.transformers")}
-          value={hostReading(
-            systemInfo.ml_packages.transformers ??
-              t("settings.resources.environment.notInstalled"),
-          )}
+          label="Runtime"
+          value="SlothForge v0.1.0 (Rust/Vulkan)"
         />
         <InfoRow
           label={t("settings.resources.environment.uptime")}

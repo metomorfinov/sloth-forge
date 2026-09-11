@@ -33,9 +33,9 @@ export interface ChannelPreset {
 export const CHANNEL_PRESETS: readonly ChannelPreset[] = [
   {
     id: "unsloth-trending",
-    label: "Unsloth Trending",
+    label: "Community Trending",
     icon: SparklesIcon,
-    hint: "Most trending models published by Unsloth.",
+    hint: "Most trending community models.",
     owner: "unsloth",
     tags: ["gguf"],
     format: "gguf",
@@ -43,9 +43,9 @@ export const CHANNEL_PRESETS: readonly ChannelPreset[] = [
   },
   {
     id: "unsloth-latest",
-    label: "Latest Unsloth",
+    label: "Latest Models",
     icon: NewReleasesIcon,
-    hint: "Freshly released models from the Unsloth channel.",
+    hint: "Freshly released models.",
     owner: "unsloth",
     format: "all",
     // Newest by creation date so the feed shows freshly released models, not

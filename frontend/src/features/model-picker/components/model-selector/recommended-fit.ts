@@ -72,9 +72,18 @@ const PARAM_RE = /(?:^|[-_/. ])[eE]?(\d+(?:\.\d+)?)\s*[bB](?=$|[-_./ ])/;
  *  can treat the size as unknown. */
 export function paramsFromId(id: string): number | undefined {
   const match = PARAM_RE.exec(id);
-  if (!match) return undefined;
-  const billions = Number.parseFloat(match[1]);
-  return Number.isFinite(billions) && billions > 0 ? billions * 1e9 : undefined;
+  if (match) {
+    const billions = Number.parseFloat(match[1]);
+    if (Number.isFinite(billions) && billions > 0) return billions * 1e9;
+  }
+  const lower = id.toLowerCase();
+  if (/(?:^|[-_/. ])glm[-_]?5(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return 32e9;
+  }
+  if (/(?:^|[-_/. ])glm[-_]?4(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return 9e9;
+  }
+  return undefined;
 }
 
 // Smallest practical GGUF/MLX quant (~Q2_K). The fit check asks whether a model can run at
@@ -136,14 +145,16 @@ export function fitsDevice(opts: {
         ) !== "oom"
       );
     }
-    return (
-      classifyGgufFit(sizeBytes, {
-        gpuGb,
-        systemRamGb,
-        budgetFraction,
-        gpuCount,
-      }) !== "oom"
-    );
+    const fitClass = classifyGgufFit(sizeBytes, {
+      gpuGb,
+      systemRamGb,
+      budgetFraction,
+      gpuCount,
+    });
+    if (gpuGb && gpuGb > 0) {
+      return fitClass === "fits" || fitClass === "marginal";
+    }
+    return fitClass !== "oom";
   }
   return requireKnown ? false : true;
 }

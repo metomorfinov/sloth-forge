@@ -288,7 +288,7 @@ function ModelStatusChips({
   // The format-unsupported chip already explains itself; this one covers the
   // supported-format model a chat-only host still can't run.
   const showChatOnly = !isDataset && !isGguf && chatOnly && !showUnsupported;
-  const showVram = !isDataset && vramInfo && !isGguf;
+  const showVram = !isDataset && Boolean(vramInfo);
   if (!showUnsupported && !showChatOnly && !showVram) return null;
 
   const vramTone = vramInfo
@@ -307,10 +307,12 @@ function ModelStatusChips({
     : "";
   const vramDetail = vramInfo
     ? vramInfo.status === "exceeds"
-      ? "A 4-bit load is likely to exceed the current GPU budget. Higher-precision loads need even more."
+      ? isGguf
+        ? "This model exceeds your GPU VRAM budget and may require CPU offloading or fail to load."
+        : "A 4-bit load is likely to exceed the current GPU budget. Higher-precision loads need even more."
       : vramInfo.status === "tight"
-        ? "A 4-bit load should fit, with limited headroom for context and activations."
-        : "A 4-bit load should fit comfortably on the current GPU."
+        ? "This load should fit, with limited headroom for context and activations."
+        : "This load should fit comfortably on the current GPU."
     : "";
 
   return (

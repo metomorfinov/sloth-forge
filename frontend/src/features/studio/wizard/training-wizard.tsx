@@ -16,6 +16,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { usePlatformStore } from "@/config/env";
+import { aggregateGpuMemoryTotalGb, useSystemInfo } from "@/hooks/use-system";
 import { TrainModelSelector } from "@/features/train-model-picker";
 import {
   TRAINING_METHOD_META,
@@ -162,6 +163,8 @@ function TrainingMethodSelect() {
   const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
   const setTrainingMethod = useTrainingConfigStore((s) => s.setTrainingMethod);
   const deviceType = usePlatformStore((state) => state.deviceType);
+  const systemInfo = useSystemInfo();
+  const vramTotalGb = aggregateGpuMemoryTotalGb(systemInfo.gpu?.devices);
   const activeMeta = TRAINING_METHOD_META[trainingMethod];
   const activeLabel = activeMeta ? t(activeMeta.labelKey) : trainingMethod;
   return (
@@ -202,6 +205,7 @@ function TrainingMethodSelect() {
           const unsupportedOnMlx = !isTrainingMethodSupportedOnDevice(
             method,
             deviceType,
+            vramTotalGb,
           );
           return (
             <Tooltip key={method} delayDuration={300}>

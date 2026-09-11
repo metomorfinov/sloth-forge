@@ -261,6 +261,15 @@ impl Default for ChatSettingsState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanFolderEntry {
+    pub id: u64,
+    pub path: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
 pub struct AppState {
     pub vk_ctx: Option<VulkanContext>,
     pub coordinator: Arc<ClusterCoordinator>,
@@ -276,6 +285,7 @@ pub struct AppState {
     pub chat_settings: Arc<RwLock<ChatSettingsState>>,
     pub vram_budget_mb: Arc<AtomicU64>,
     pub upload_limit_bytes: Arc<AtomicU64>,
+    pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
 }
 
 impl AppState {
@@ -303,6 +313,7 @@ impl AppState {
             chat_settings: Arc::new(RwLock::new(ChatSettingsState::default())),
             vram_budget_mb: Arc::new(AtomicU64::new(4096)),
             upload_limit_bytes: Arc::new(AtomicU64::new(10737418240)),
+            scan_folders: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }

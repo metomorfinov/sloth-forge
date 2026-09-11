@@ -40,8 +40,21 @@ export function getTrainingMethodLabel(
 export function isTrainingMethodSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
+  vramTotalGb?: number,
 ): boolean {
-  return deviceType !== "mac" || trainingMethod !== "cpt";
+  // Block CPT on Mac
+  if (deviceType === "mac" && trainingMethod === "cpt") return false;
+
+  // Vulkan / low-VRAM filtering
+  const isLowVram = (vramTotalGb ?? 0) > 0 && (vramTotalGb ?? 0) < 8;
+  const isVulkan = deviceType === "vulkan";
+
+  if (isVulkan || isLowVram) {
+    if (trainingMethod === "full") return false;  // Requires 16+ GB VRAM
+    if (trainingMethod === "cpt") return false;   // Requires 24+ GB VRAM
+  }
+
+  return true;
 }
 
 export function isTrainingModelTypeSupportedOnDevice(

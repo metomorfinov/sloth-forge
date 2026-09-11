@@ -12,12 +12,29 @@ function matchParamCount(id: string): RegExpMatchArray | null {
 
 export function extractParamLabel(id: string): string | null {
   const m = matchParamCount(id);
-  return m ? `${m[1]}B` : null;
+  if (m) return `${m[1]}B`;
+  const lower = id.toLowerCase();
+  if (/(?:^|[-_/. ])glm[-_]?5(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return "32B";
+  }
+  if (/(?:^|[-_/. ])glm[-_]?4(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return "9B";
+  }
+  return null;
 }
 
 export function parseParamCountB(id: string): number | null {
   const m = matchParamCount(id);
-  if (!m) return null;
-  const v = Number.parseFloat(m[1]);
-  return Number.isFinite(v) ? v : null;
+  if (m) {
+    const v = Number.parseFloat(m[1]);
+    return Number.isFinite(v) ? v : null;
+  }
+  const lower = id.toLowerCase();
+  if (/(?:^|[-_/. ])glm[-_]?5(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return 32;
+  }
+  if (/(?:^|[-_/. ])glm[-_]?4(?:\.\d+)?(?:$|[-_/. ])/i.test(lower)) {
+    return 9;
+  }
+  return null;
 }

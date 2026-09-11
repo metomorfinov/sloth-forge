@@ -1060,3 +1060,448 @@ async fn test_settings_and_studio_export_endpoints() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["knowledge_bases"].as_array().map(|a| a.len()), Some(0));
 }
+
+#[tokio::test]
+async fn test_hub_transport_statuses() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/hub/transport-status
+    let resp = client
+        .get(format!("{base_url}/api/hub/transport-status?repo_id=unsloth/test-model"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("idle"));
+    assert_eq!(body["transport"].as_str(), Some("direct"));
+    assert_eq!(body["active"].as_bool(), Some(false));
+    assert_eq!(body["has_partial"].as_bool(), Some(false));
+    assert!(body["last_transport"].is_null());
+    assert_eq!(body["resumable"].as_bool(), Some(false));
+
+    // 2. GET /api/hub/datasets/transport-status
+    let resp = client
+        .get(format!("{base_url}/api/hub/datasets/transport-status?repo_id=unsloth/test-dataset"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("idle"));
+    assert_eq!(body["transport"].as_str(), Some("direct"));
+    assert_eq!(body["active"].as_bool(), Some(false));
+    assert_eq!(body["has_partial"].as_bool(), Some(false));
+    assert!(body["last_transport"].is_null());
+    assert_eq!(body["resumable"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn test_hub_gguf_download_progress() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base_url}/api/hub/gguf-download-progress?repo_id=unsloth/Llama-3.2-3B-Instruct-GGUF&variant=Q4_K_M&expected_bytes=2023751680"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["cache_measured"].as_bool(), Some(true));
+    assert!(body["progress"].as_f64().is_some());
+    assert!(body["downloaded_bytes"].as_u64().is_some());
+    assert!(body["completed_bytes"].as_u64().is_some());
+    assert!(body["expected_bytes"].as_u64().is_some());
+    assert!(body["complete_on_disk"].as_bool().is_some());
+}
+
+#[tokio::test]
+async fn test_hub_datasets_download_lifecycle() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Start dataset download
+    let start_payload = serde_json::json!({
+        "repo_id": "unsloth/Open-Orca",
+        "use_xet": false,
+        "transport_mode": "http"
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/datasets/download"))
+        .json(&start_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["repo_id"].as_str(), Some("unsloth/Open-Orca"));
+    assert_eq!(body["state"].as_str(), Some("running"));
+    assert_eq!(body["accepted"].as_bool(), Some(true));
+    assert_eq!(body["generation"].as_u64(), Some(1));
+
+    // 2. Dataset download status
+    let resp = client
+        .get(format!("{base_url}/api/hub/datasets/download-status?repo_id=unsloth/Open-Orca"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["state"].as_str(), Some("idle"));
+    assert!(body["error"].is_null());
+
+    // 3. Cancel dataset download
+    let cancel_payload = serde_json::json!({
+        "repo_id": "unsloth/Open-Orca",
+        "generation": 1
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/datasets/download/cancel"))
+        .json(&cancel_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["repo_id"].as_str(), Some("unsloth/Open-Orca"));
+    assert_eq!(body["state"].as_str(), Some("cancelled"));
+
+    // 4. Delete cached dataset
+    let del_payload = serde_json::json!({
+        "repo_id": "unsloth/Open-Orca"
+    });
+    let resp = client
+        .delete(format!("{base_url}/api/hub/datasets/cached"))
+        .json(&del_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("ok"));
+}
+
+#[tokio::test]
+async fn test_hub_delete_cached_model() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. POST /api/hub/delete-cached
+    let payload = serde_json::json!({
+        "repo_id": "unsloth/test-model",
+        "variant": "Q4_K_M"
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/delete-cached"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert_eq!(body["deleted"].as_bool(), Some(true));
+
+    // 2. DELETE /api/hub/delete-cached
+    let resp = client
+        .delete(format!("{base_url}/api/hub/delete-cached"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert_eq!(body["deleted"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn test_hub_scan_folders_crud() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Initial list is empty
+    let resp = client.get(format!("{base_url}/api/hub/scan-folders")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(0));
+
+    // 2. Add scan folder
+    let add_payload = serde_json::json!({
+        "path": "/home/rivergod/custom-models"
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/scan-folders"))
+        .json(&add_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let folder: serde_json::Value = resp.json().await.unwrap();
+    let folder_id = folder["id"].as_u64().unwrap();
+    assert_eq!(folder["path"].as_str(), Some("/home/rivergod/custom-models"));
+
+    // 3. List shows added folder
+    let resp = client.get(format!("{base_url}/api/hub/scan-folders")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(1));
+
+    // 4. Delete scan folder
+    let resp = client
+        .delete(format!("{base_url}/api/hub/scan-folders/{folder_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 5. List is empty again
+    let resp = client.get(format!("{base_url}/api/hub/scan-folders")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn test_model_download_flexible_payload() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Flexible payload using camelCase and alternate names:
+    // repoId instead of repo_id, quant instead of gguf_variant, file_name instead of filename,
+    // revision, transportMode, useXet
+    let flex_payload = serde_json::json!({
+        "repoId": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+        "quant": "Q4_K_M",
+        "file_name": "model-Q4_K_M.gguf",
+        "revision": "main",
+        "transportMode": "http",
+        "useXet": false,
+        "scopeId": null
+    });
+
+    let resp = client
+        .post(format!("{base_url}/api/hub/download"))
+        .json(&flex_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let start_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(start_resp["state"].as_str(), Some("running"));
+    assert_eq!(start_resp["accepted"].as_bool(), Some(true));
+    assert_eq!(start_resp["job_key"].as_str(), Some("job-default"));
+    assert_eq!(start_resp["generation"].as_u64(), Some(1));
+    assert_eq!(start_resp["transport"].as_str(), Some("http"));
+
+    // Check download status
+    let resp = client
+        .get(format!("{base_url}/api/hub/download-status?repo_id=unsloth/Llama-3.2-3B-Instruct-GGUF&gguf_variant=Q4_K_M"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let status_resp: serde_json::Value = resp.json().await.unwrap();
+    assert!(status_resp["state"].as_str().is_some());
+    assert!(status_resp["error"].is_null());
+
+    // Check download progress
+    let resp = client
+        .get(format!("{base_url}/api/hub/download-progress?repo_id=unsloth/Llama-3.2-3B-Instruct-GGUF"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let prog_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(prog_resp["cache_measured"].as_bool(), Some(true));
+    assert!(prog_resp["expected_bytes"].as_u64().unwrap() > 0);
+
+    // Cancel with flexible payload
+    let cancel_payload = serde_json::json!({
+        "repo_id": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+        "gguf_variant": "Q4_K_M",
+        "generation": 1
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/download/cancel"))
+        .json(&cancel_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let cancel_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(cancel_resp["state"].as_str(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn test_hub_token_validate_and_dataset_utils() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. POST /api/hub/token/validate
+    let resp = client
+        .post(format!("{base_url}/api/hub/token/validate"))
+        .header("authorization", "Bearer hf_testtoken12345")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let val: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(val["status"].as_str(), Some("valid"));
+
+    // 2. POST /api/hub/datasets/check-format
+    let resp = client
+        .post(format!("{base_url}/api/hub/datasets/check-format"))
+        .json(&serde_json::json!({"dataset_name": "yahma/alpaca-cleaned"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let cf: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(cf["requires_manual_mapping"].as_bool(), Some(false));
+    assert_eq!(cf["detected_format"].as_str(), Some("alpaca"));
+
+    // 3. POST /api/hub/delete-impact
+    let resp = client
+        .post(format!("{base_url}/api/hub/delete-impact"))
+        .json(&serde_json::json!({"repo_id": "unsloth/Llama-3.2-3B-Instruct-GGUF"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let impact: serde_json::Value = resp.json().await.unwrap();
+    assert!(impact["reclaimed_bytes"].as_u64().is_some());
+    assert!(impact["affected_models"].as_array().is_some());
+
+    // 4. GET /api/hub/orphan-companions
+    let resp = client
+        .get(format!("{base_url}/api/hub/orphan-companions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let orphans: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(orphans["total_bytes"].as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn test_audited_endpoints_and_schemas() {
+    let (base_url, _state) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Hardware schema check
+    let resp = client.get(format!("{base_url}/api/system/hardware")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let hw: serde_json::Value = resp.json().await.unwrap();
+    assert!(hw["gpu"]["gpu_name"].is_string());
+    assert!(hw["gpu"]["vram_total_gb"].is_number());
+    assert!(hw["versions"]["vulkan"].is_string());
+    assert!(hw["export_supported"].is_boolean());
+
+    // 2. Personalization schema check
+    let resp = client.get(format!("{base_url}/api/settings/personalization")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let pers: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(pers["version"].as_u64(), Some(1));
+    assert!(pers["profile"].is_object());
+    assert!(pers["appearance"].is_object());
+
+    // 3. Upload limit schema check
+    let resp = client.get(format!("{base_url}/api/settings/upload-limit")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ul: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(ul["max_upload_size_mb"].as_u64(), Some(10240));
+    assert!(ul["max_upload_size_bytes"].is_number());
+
+    // 4. VRAM budget fraction
+    let resp = client
+        .put(format!("{base_url}/api/settings/vram-budget"))
+        .json(&serde_json::json!({ "fraction": 0.85 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let vb: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(vb["fraction"].as_f64(), Some(0.85));
+
+    // 5. Studio download transport capabilities
+    let resp = client.get(format!("{base_url}/api/studio/download-transport-capabilities")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let tc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tc["auto_resolves_to"].as_str(), Some("http"));
+    assert_eq!(tc["http"]["available"].as_bool(), Some(true));
+    assert_eq!(tc["xet"]["available"].as_bool(), Some(false));
+
+    // 6. Model path and reveal
+    let resp = client.get(format!("{base_url}/api/models/cached-model-path?repo_id=test/model")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let mp: serde_json::Value = resp.json().await.unwrap();
+    assert!(mp["path"].is_string());
+
+    let resp = client.post(format!("{base_url}/api/models/reveal-cached-model"))
+        .json(&serde_json::json!({ "repo_id": "test/model" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 7. Model progress under /models/
+    let resp = client.get(format!("{base_url}/api/models/download-progress?job_id=nonexistent")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.get(format!("{base_url}/api/models/gguf-download-progress?repo_id=test/m&variant=Q4_K_M")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 8. Picker chat template
+    let resp = client.post(format!("{base_url}/api/picker/validate-chat-template"))
+        .json(&serde_json::json!({ "template": "{{ bos_token }}" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let tmpl_val: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tmpl_val["valid"].as_bool(), Some(true));
+
+    let resp = client.get(format!("{base_url}/api/picker/chat-template/model-1")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 9. Inference cancel, count tokens, monitor reset
+    let resp = client.post(format!("{base_url}/api/inference/cancel")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.post(format!("{base_url}/api/inference/chat/count_tokens"))
+        .json(&serde_json::json!({ "messages": [{"role": "user", "content": "hello"}] }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.delete(format!("{base_url}/api/inference/monitor")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 10. Chat messages PUT & detail PUT, project PATCH
+    let resp = client.put(format!("{base_url}/api/chat/threads/th-1/messages")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.put(format!("{base_url}/api/chat/threads/th-1/messages/msg-1")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.patch(format!("{base_url}/api/chat/projects/prj-1")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 11. Auth API Keys
+    let resp = client.get(format!("{base_url}/api/auth/api-keys")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.post(format!("{base_url}/api/auth/api-keys"))
+        .json(&serde_json::json!({ "name": "Test Key" }))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let k: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(k["name"].as_str(), Some("Test Key"));
+    let resp = client.delete(format!("{base_url}/api/auth/api-keys/key-1")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 12. Profile stats, release notes, changelog
+    let resp = client.get(format!("{base_url}/api/profile/stats")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.get(format!("{base_url}/api/studio/release-notes")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.get(format!("{base_url}/api/llama/update-changelog")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 13. Export actions
+    let resp = client.get(format!("{base_url}/api/export/logs")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.post(format!("{base_url}/api/export/export/gguf")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+

@@ -657,11 +657,11 @@ function VramBudgetRow() {
             <div>
               Applies to every model, not just this one, and takes effect on the
               next load. Default {defaultPercent}%. Even at 100% a load leaves a
-              margin on each card, up to the 512 MiB llama.cpp keeps for its own
+              margin on each card, up to the 512 MiB the engine keeps for its own
               fitter, and never more than the default would have reserved.
             </div>
             <div>
-              Reset clears the stored value, so UNSLOTH_VRAM_FRACTION applies
+              Reset clears the stored value, so the default VRAM fraction applies
               again if it is set.
             </div>
           </div>
@@ -670,7 +670,7 @@ function VramBudgetRow() {
       {percent !== defaultPercent && (
         <p id={adviceId} className="text-ui-11 text-amber-500">
           {percent > defaultPercent
-            ? "Above the default fits more context but leaves less slack, so a load can run out of memory. llama.cpp treats that as a hard failure rather than falling back."
+            ? "Above the default fits more context but leaves less slack, so a load can run out of memory. The engine treats that as a hard failure rather than falling back."
             : "Below the default is safer on a shared GPU, but a tight fit may push layers onto the CPU and generate slowly."}
         </p>
       )}
@@ -754,12 +754,12 @@ function GpuMemorySettings({
           <InfoHint>
             <div className="flex flex-col gap-1.5">
               <div>
-                <span className="font-medium">Default:</span> Unsloth fits the
+                <span className="font-medium">Default:</span> SlothForge fits the
                 model and context to your GPUs.
               </div>
               <div>
                 <span className="font-medium">Manual:</span> set GPU Layers
-                yourself. Leave it on Auto to let llama.cpp size the context and
+                yourself. Leave it on Auto to let the engine size the context and
                 offload overflow (including MoE experts) to RAM.
               </div>
             </div>
@@ -815,7 +815,7 @@ function GpuMemorySettings({
             info={
               <>
                 Layers to keep on the GPU (--gpu-layers); the rest run on CPU.
-                Auto lets llama.cpp size the split (and the context) to fit
+                Auto lets the engine size the split (and the context) to fit
                 VRAM. At the maximum, the whole model is on the GPU.
               </>
             }
@@ -1017,9 +1017,9 @@ function LoadModeRow({
           <span className={LABEL_CLASS}>Mmap/Mlock</span>
           <InfoHint>
             How the weights are read off disk (--load-mode). Auto is the
-            default: Unsloth picks None when it can prove the model fits without
+            default: SlothForge picks None when it can prove the model fits without
             paging, since a mapped read is slower, and otherwise leaves the
-            choice to llama.cpp, which memory-maps unless a device cannot. mmap
+            choice to the engine, which memory-maps unless a device cannot. mmap
             forces the mapping, mlock keeps the model in RAM rather than letting
             it swap or compress, mmap+mlock does both, DirectIO streams the file
             where the platform supports it, and None asks for no special mode.
@@ -1316,7 +1316,7 @@ function GgufAdvancedSettings({
               <span className={LABEL_CLASS}>Batch Size</span>
               <InfoHint>
                 Logical prompt batch size (--batch-size). Leave blank for the
-                llama.cpp default (2048). Rarely needs changing; the micro-batch
+                engine default (2048). Rarely needs changing; the micro-batch
                 below is what usually matters.
               </InfoHint>
             </div>
@@ -1363,7 +1363,7 @@ function GgufAdvancedSettings({
               <span className={LABEL_CLASS}>Micro-batch Size</span>
               <InfoHint>
                 Physical prompt micro-batch size (--ubatch-size). Leave blank for
-                the llama.cpp default (512). Larger values speed up prompt
+                the engine default (512). Larger values speed up prompt
                 processing but use more VRAM for the compute buffer; capped at the
                 batch size.
               </InfoHint>
@@ -1395,7 +1395,7 @@ function GgufAdvancedSettings({
           </div>
           {ubatchExceedsBatch && (
             <p id={ubatchAdviceId} className="text-ui-12 text-muted-foreground">
-              Micro-batch is larger than the batch size, so llama.cpp will run at{" "}
+              Micro-batch is larger than the batch size, so the engine will run at{" "}
               {effectiveBatch}. Raise the batch size to use {config.nUbatch}.
             </p>
           )}
@@ -1468,7 +1468,7 @@ function GgufAdvancedSettings({
               <InfoHint>
                 Context checkpoints kept per slot (--ctx-checkpoints), which let
                 a sliding-window model rewind instead of re-processing the
-                prompt. Leave blank for the llama.cpp default (
+                prompt. Leave blank for the engine default (
                 {CTX_CHECKPOINTS_LLAMA_DEFAULT}); 0 disables them. Each one costs
                 host memory, and models without a sliding window ignore the
                 setting.
@@ -1506,9 +1506,9 @@ function GgufAdvancedSettings({
             <div className="flex min-w-0 items-center gap-1.5">
               <span className={LABEL_CLASS}>Cache RAM</span>
               <InfoHint>
-                Host memory in MiB llama-server may spend caching prompt state it
+                Host memory in MiB the engine may spend caching prompt state it
                 has evicted from a slot (--cache-ram), so a returning
-                conversation is not re-processed. Leave blank for the llama.cpp
+                conversation is not re-processed. Leave blank for the
                 default ({CACHE_RAM_LLAMA_DEFAULT}); 0 disables the cache and -1
                 lifts the limit.
               </InfoHint>

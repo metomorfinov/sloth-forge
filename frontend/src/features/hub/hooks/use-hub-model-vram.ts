@@ -8,6 +8,7 @@ import {
   checkVramFit,
   estimateLoadingVram,
 } from "@/lib/vram";
+import { requiredGgufMemoryGb } from "@/lib/gguf-fit";
 import { formatBytes } from "@/features/hub/lib/format";
 import type { SelectedModelView } from "../types";
 
@@ -21,11 +22,25 @@ export function useHubModelVram(
   gpu: GpuInfo,
 ): { vramInfo: ModelVramInfo | null; minMemory: string | null } {
   const vramInfo = useMemo<ModelVramInfo | null>(() => {
-    if (!selectedModel || selectedModel.isGguf || !selectedModel.totalParams) {
+    if (!selectedModel) {
+      return null;
+    }
+    const gpuGb = gpu.available ? gpu.memoryTotalGb : 0;
+    if (selectedModel.isGguf) {
+      const sizeBytes =
+        selectedModel.cachedBytes ||
+        selectedModel.estimatedSizeBytes ||
+        (selectedModel.totalParams ? selectedModel.totalParams * 0.5 : 0);
+      if (!sizeBytes) return null;
+      const est = Math.round(requiredGgufMemoryGb(sizeBytes) * 10) / 10;
+      const status = checkVramFit(est, gpuGb);
+      return status ? { est, status } : null;
+    }
+    if (!selectedModel.totalParams) {
       return null;
     }
     const est = estimateLoadingVram(selectedModel.totalParams, "qlora");
-    const status = checkVramFit(est, gpu.available ? gpu.memoryTotalGb : 0);
+    const status = checkVramFit(est, gpuGb);
     return status ? { est, status } : null;
   }, [gpu, selectedModel]);
 

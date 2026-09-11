@@ -1722,9 +1722,15 @@ function GgufVariantExpander({
     [variantGroups, defaultVariant],
   );
 
-  // Each workflow gets its own recommendation: if its preferred variant is OOM use the largest
-  // that can run, and if all are OOM the smallest.
+  // Each workflow gets its own recommendation: only recommend variants that actually fit the device budget.
   const effectiveRecommendedByGroup = useMemo(() => {
+    const isAcceptable = (sizeBytes: number) => {
+      const fit = getGgufFit(sizeBytes);
+      if (gpuGb && gpuGb > 0) {
+        return fit === "fits" || fit === "marginal";
+      }
+      return fit !== "oom";
+    };
     const recommended = new Map<string, string>();
     for (const group of variantGroups) {
       const preferred = preferredByGroup.get(group.key) ?? null;
@@ -1732,24 +1738,20 @@ function GgufVariantExpander({
         if (preferred) recommended.set(group.key, preferred.quant);
         continue;
       }
-      if (preferred && getGgufFit(preferred.size_bytes) !== "oom") {
+      if (preferred && isAcceptable(preferred.size_bytes)) {
         recommended.set(group.key, preferred.quant);
         continue;
       }
       const fitting = group.variants
-        .filter((variant) => getGgufFit(variant.size_bytes) !== "oom")
+        .filter((variant) => isAcceptable(variant.size_bytes))
         .sort((left, right) => right.size_bytes - left.size_bytes);
       if (fitting[0]) {
         recommended.set(group.key, fitting[0].quant);
         continue;
       }
-      const smallest = [...group.variants].sort(
-        (left, right) => left.size_bytes - right.size_bytes,
-      )[0];
-      if (smallest) recommended.set(group.key, smallest.quant);
     }
     return recommended;
-  }, [variantGroups, preferredByGroup, anyBudgetGb, budgetKnown, getGgufFit]);
+  }, [variantGroups, preferredByGroup, anyBudgetGb, budgetKnown, getGgufFit, gpuGb]);
   // `effectiveRecommendedByGroup` is keyed by PRESENTATION group ("quantizations", "text-frames",
   // "reference-media") while the footprint pass buckets by the backend's dependency_key
   // ("flux.2-klein:<digest>"), so that pass asks through the variant itself.
@@ -4040,7 +4042,7 @@ export function HubModelPicker({
         ) {
           // Loading it here would evict the chat model for a repo neither surface can run.
           toast.error(
-            `${id} is not a speech model Unsloth can run yet. The Audio page lists the families it supports.`,
+            `${id} is not a speech model SlothForge can run yet. The Audio page lists the families it supports.`,
             { duration: 7000 },
           );
           return;
@@ -4943,7 +4945,7 @@ export function HubModelPicker({
         value={recommendedSort}
         options={RECOMMENDED_SORT_OPTIONS}
         onValueChange={setRecommendedSort}
-        ariaLabel="Sort Unsloth models"
+        ariaLabel="Sort recommended models"
         align="end"
         className={sortTriggerClassName}
         contentClassName={sortMenuContentClassName}
@@ -5596,7 +5598,7 @@ export function HubModelPicker({
               placeholder={
                 section === "downloaded"
                   ? "Search local models"
-                  : "Search Unsloth models"
+                  : "Search recommended models"
               }
               data-model-picker-search-input={true}
               className="field-soft h-(--picker-control-h) border-0 pl-8 pr-8"
@@ -5799,7 +5801,7 @@ export function HubModelPicker({
                                 side="bottom"
                                 className="tooltip-compact"
                               >
-                                Other non-Unsloth models
+                                Other community models
                               </TooltipContent>
                             </Tooltip>
                           ) : null}
@@ -5851,7 +5853,7 @@ export function HubModelPicker({
                       }
                     >
                       {/* Rows drop the unsloth/ prefix; the heading carries it for the group. */}
-                      Unsloth
+                      Featured
                     </ListLabel>
                     {!downloadedCollapsed &&
                       unslothCachedGguf.map(renderDownloadedGgufRow)}
