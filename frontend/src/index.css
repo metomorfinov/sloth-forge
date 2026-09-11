@@ -1,0 +1,196 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-base: #0B0E14;
+    --surface-card: #121722;
+    --surface-panel: #181F2E;
+    --border-subtle: #1E2638;
+    --border-active: #273248;
+    --border-hover: #334155;
+    --accent-flame: #FF7A00;
+    --accent-flame-hover: #FF8F26;
+    --accent-flame-muted: rgba(255, 122, 0, 0.12);
+    --accent-flame-border: rgba(255, 122, 0, 0.35);
+    --text-primary: #FFFFFF;
+    --text-muted: #94A3B8;
+    --text-dim: #64748B;
+    --status-success: #10B981;
+    --status-warning: #F59E0B;
+    --status-error: #EF4444;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: #0B0E14;
+    color: #FFFFFF;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom high-density scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0B0E14;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1E2638;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #273248;
+  }
+}
+
+/* Monospace font utility for numbers and metrics */
+.font-mono-code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Custom Unsloth-style Range Slider */
+input[type="range"].flame-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: #181F2E;
+  height: 6px;
+  border-radius: 9999px;
+  border: 1px solid #1E2638;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+input[type="range"].flame-range:hover {
+  border-color: #273248;
+}
+
+input[type="range"].flame-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #FF7A00;
+  border: 2px solid #0B0E14;
+  box-shadow: 0 0 10px rgba(255, 122, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.1s ease, background-color 0.15s ease;
+}
+
+input[type="range"].flame-range::-webkit-slider-thumb:hover {
+  background: #FF8F26;
+  transform: scale(1.15);
+}
+
+input[type="range"].flame-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #FF7A00;
+  border: 2px solid #0B0E14;
+  box-shadow: 0 0 10px rgba(255, 122, 0, 0.4);
+  cursor: pointer;
+  transition: transform 0.1s ease, background-color 0.15s ease;
+}
+
+/* Tactile Pill Button classes */
+.btn-pill-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.875rem;
+  border-radius: 9999px;
+  background-color: #FF7A00;
+  color: #FFFFFF;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.15s ease-out;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 2px 8px rgba(255, 122, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn-pill-primary:hover:not(:disabled) {
+  background-color: #FF8F26;
+  box-shadow: 0 4px 14px rgba(255, 122, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-pill-primary:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 4px rgba(255, 122, 0, 0.2);
+}
+
+.btn-pill-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.btn-pill-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  font-size: 0.875rem;
+  border-radius: 9999px;
+  background-color: #181F2E;
+  color: #FFFFFF;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.15s ease-out;
+  border: 1px solid #273248;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn-pill-secondary:hover:not(:disabled) {
+  background-color: #1E2638;
+  border-color: #334155;
+  color: #FFFFFF;
+  transform: translateY(-1px);
+}
+
+.btn-pill-secondary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-pill-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-pill-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.875rem;
+  border-radius: 9999px;
+  background-color: rgba(239, 68, 68, 0.12);
+  color: #F87171;
+  padding: 0.5rem 1.25rem;
+  transition: all 0.15s ease-out;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn-pill-danger:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.22);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #FFFFFF;
+  transform: translateY(-1px);
+}
