@@ -5,6 +5,7 @@ build/
 *.so
 *.a
 *.spv
+test_vulkan
 
 # Node & Frontend
 node_modules/

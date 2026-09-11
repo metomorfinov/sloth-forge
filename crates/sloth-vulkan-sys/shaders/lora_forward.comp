@@ -1,0 +1,119 @@
+#version 450
+
+// Fused forward LoRA calculation:
+// y = W_base * x + (alpha / rank) * B_lora * (A_lora * x)
+//
+// Optimized for AMD Polaris 10 wavefront-64.
+// Workgroup size: (16, 4, 1) = 64 invocations (exactly 1 wavefront).
+// 16 output channels x 4 tokens per workgroup.
+
+layout(local_size_x = 16, local_size_y = 4, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InputX {
+    float X[];
+};
+
+layout(std430, binding = 1) readonly buffer BaseWeight {
+    float W_base[];
+};
+
+layout(std430, binding = 2) readonly buffer LoraA {
+    float A_lora[];
+};
+
+layout(std430, binding = 3) readonly buffer LoraB {
+    float B_lora[];
+};
+
+layout(std430, binding = 4) writeonly buffer OutputBuf {
+    float Out[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_seq;
+    uint in_dim;
+    uint out_dim;
+    uint rank;
+    float alpha;
+    uint layout_mode; // 0 = PyTorch PEFT ([out,in], [rank,in], [out,rank]), 1 = Linear ([in,out], [in,rank], [rank,out])
+    uint has_base_weight; // 1 = compute W_base * x, 0 = skip base weight
+} pc;
+
+shared float shared_h[4][128];
+
+void main() {
+    uint tx = gl_LocalInvocationID.x; // 0..15 (channel lane)
+    uint ty = gl_LocalInvocationID.y; // 0..3  (token lane)
+
+    uint out_channel = gl_WorkGroupID.x * 16 + tx;
+    uint token_idx   = gl_WorkGroupID.y * 4 + ty;
+
+    uint effective_rank = min(pc.rank, 128u);
+
+    // Phase 1: Cooperatively compute intermediate low-rank vector h = A * x
+    if (token_idx < pc.batch_seq) {
+        uint x_base = token_idx * pc.in_dim;
+
+        // 16 lanes per token cooperate to evaluate each rank element
+        for (uint r = tx; r < effective_rank; r += 16) {
+            float sum = 0.0;
+            if (pc.layout_mode == 0u) {
+                // PyTorch PEFT layout: A is [rank, in_dim]
+                uint a_base = r * pc.in_dim;
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    sum += X[x_base + k] * A_lora[a_base + k];
+                }
+            } else {
+                // Row-major linear layout: A is [in_dim, rank]
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    sum += X[x_base + k] * A_lora[k * pc.rank + r];
+                }
+            }
+            shared_h[ty][r] = sum;
+        }
+    }
+
+    barrier();
+
+    // Phase 2: Compute base weight term and LoRA term
+    if (token_idx < pc.batch_seq && out_channel < pc.out_dim) {
+        uint x_base = token_idx * pc.in_dim;
+
+        // Base projection: W_base * x
+        float base_sum = 0.0;
+        if (pc.has_base_weight != 0u) {
+            if (pc.layout_mode == 0u) {
+                // W_base is [out_dim, in_dim]
+                uint w_base = out_channel * pc.in_dim;
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    base_sum += X[x_base + k] * W_base[w_base + k];
+                }
+            } else {
+                // W_base is [in_dim, out_dim]
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    base_sum += X[x_base + k] * W_base[k * pc.out_dim + out_channel];
+                }
+            }
+        }
+
+        // LoRA projection: (alpha / rank) * B_lora * h
+        float lora_sum = 0.0;
+        float scale = (pc.rank > 0u) ? (pc.alpha / float(pc.rank)) : 0.0;
+
+        if (pc.layout_mode == 0u) {
+            // B_lora is [out_dim, rank]
+            uint b_base = out_channel * pc.rank;
+            for (uint r = 0; r < effective_rank; ++r) {
+                lora_sum += B_lora[b_base + r] * shared_h[ty][r];
+            }
+        } else {
+            // B_lora is [rank, out_dim]
+            for (uint r = 0; r < effective_rank; ++r) {
+                lora_sum += B_lora[r * pc.out_dim + out_channel] * shared_h[ty][r];
+            }
+        }
+
+        uint out_idx = token_idx * pc.out_dim + out_channel;
+        Out[out_idx] = base_sum + scale * lora_sum;
+    }
+}

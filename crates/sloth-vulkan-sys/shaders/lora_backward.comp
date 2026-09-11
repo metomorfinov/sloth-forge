@@ -1,0 +1,130 @@
+#version 450
+
+// LoRA backward gradient calculation:
+// Computes dA_grad and dB_grad directly in GPU VRAM without CPU roundtrip.
+//
+// Optimized for AMD Polaris 10 wavefront-64.
+// Workgroup size: (64, 1, 1) = 64 invocations (1 wavefront).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer InputX {
+    float X[];
+};
+
+layout(std430, binding = 1) readonly buffer GradOut {
+    float dOut[];
+};
+
+layout(std430, binding = 2) readonly buffer LoraA {
+    float A_lora[];
+};
+
+layout(std430, binding = 3) readonly buffer LoraB {
+    float B_lora[];
+};
+
+layout(std430, binding = 4) writeonly buffer GradA {
+    float dA_grad[];
+};
+
+layout(std430, binding = 5) writeonly buffer GradB {
+    float dB_grad[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_seq;
+    uint in_dim;
+    uint out_dim;
+    uint rank;
+    float alpha;
+    uint layout_mode; // 0 = PyTorch PEFT ([rank, in], [out, rank]), 1 = Linear ([in, rank], [rank, out])
+    uint pass_mode;   // 0 = compute dB_grad, 1 = compute dA_grad
+} pc;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    float scale = (pc.rank > 0u) ? (pc.alpha / float(pc.rank)) : 0.0;
+
+    if (pc.pass_mode == 0u) {
+        // Compute dB_grad
+        // PEFT layout: dB is [out_dim, rank]
+        // Linear layout: dB is [rank, out_dim]
+        uint total_b_elements = pc.out_dim * pc.rank;
+        if (gid >= total_b_elements) return;
+
+        uint o, r;
+        if (pc.layout_mode == 0u) {
+            o = gid / pc.rank;
+            r = gid % pc.rank;
+        } else {
+            r = gid / pc.out_dim;
+            o = gid % pc.out_dim;
+        }
+
+        float grad_b = 0.0;
+
+        for (uint t = 0; t < pc.batch_seq; ++t) {
+            float dout_val = dOut[t * pc.out_dim + o];
+
+            // Compute h_t[r] = (A * x_t)[r]
+            float h_val = 0.0;
+            uint x_base = t * pc.in_dim;
+
+            if (pc.layout_mode == 0u) {
+                uint a_base = r * pc.in_dim;
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    h_val += X[x_base + k] * A_lora[a_base + k];
+                }
+            } else {
+                for (uint k = 0; k < pc.in_dim; ++k) {
+                    h_val += X[x_base + k] * A_lora[k * pc.rank + r];
+                }
+            }
+
+            grad_b += dout_val * h_val;
+        }
+
+        dB_grad[gid] = scale * grad_b;
+
+    } else {
+        // Compute dA_grad
+        // PEFT layout: dA is [rank, in_dim]
+        // Linear layout: dA is [in_dim, rank]
+        uint total_a_elements = pc.rank * pc.in_dim;
+        if (gid >= total_a_elements) return;
+
+        uint r, k;
+        if (pc.layout_mode == 0u) {
+            r = gid / pc.in_dim;
+            k = gid % pc.in_dim;
+        } else {
+            k = gid / pc.rank;
+            r = gid % pc.rank;
+        }
+
+        float grad_a = 0.0;
+
+        for (uint t = 0; t < pc.batch_seq; ++t) {
+            float x_val = X[t * pc.in_dim + k];
+
+            // Compute dh_t[r] = (dOut_t * B)[r]
+            float dh_val = 0.0;
+            uint dout_base = t * pc.out_dim;
+
+            if (pc.layout_mode == 0u) {
+                for (uint o = 0; o < pc.out_dim; ++o) {
+                    dh_val += dOut[dout_base + o] * B_lora[o * pc.rank + r];
+                }
+            } else {
+                for (uint o = 0; o < pc.out_dim; ++o) {
+                    dh_val += dOut[dout_base + o] * B_lora[r * pc.out_dim + o];
+                }
+            }
+
+            grad_a += dh_val * x_val;
+        }
+
+        dA_grad[gid] = scale * grad_a;
+    }
+}

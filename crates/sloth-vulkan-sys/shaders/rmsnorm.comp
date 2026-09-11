@@ -1,0 +1,169 @@
+#version 450
+
+// RMSNorm forward and backward compute shader.
+//
+// Optimized for AMD Polaris 10 wavefront-64.
+// Workgroup size: (64, 1, 1) = 64 invocations (1 wavefront).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer BufferX {
+    float X[];
+};
+
+layout(std430, binding = 1) buffer BufferGamma {
+    float Gamma[];
+};
+
+layout(std430, binding = 2) buffer BufferOut {
+    float Out[];
+};
+
+layout(std430, binding = 3) buffer BufferDOut {
+    float dOut[];
+};
+
+layout(std430, binding = 4) buffer BufferDX {
+    float dX[];
+};
+
+layout(std430, binding = 5) buffer BufferDGamma {
+    float dGamma[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint batch_seq;
+    uint dim;
+    float eps;
+    uint mode; // 0 = forward, 1 = backward dX, 2 = backward dGamma
+} pc;
+
+shared float s_data[64];
+shared float s_data2[64];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    if (pc.mode == 0u) {
+        // --- FORWARD PASS ---
+        // Each workgroup handles 1 token row
+        uint t = gl_WorkGroupID.x;
+        if (t >= pc.batch_seq) return;
+
+        uint row_offset = t * pc.dim;
+
+        // Step 1: Compute sum of squares
+        float thread_sum_sq = 0.0;
+        for (uint i = tid; i < pc.dim; i += 64) {
+            float val = X[row_offset + i];
+            thread_sum_sq += val * val;
+        }
+        s_data[tid] = thread_sum_sq;
+        barrier();
+
+        // Wavefront reduction in LDS
+        for (uint s = 32; s > 0; s >>= 1) {
+            if (tid < s) {
+                s_data[tid] += s_data[tid + s];
+            }
+            barrier();
+        }
+
+        float mean_sq = s_data[0] / float(pc.dim);
+        float inv_rms = inversesqrt(mean_sq + pc.eps);
+        if (tid == 0) {
+            s_data[0] = inv_rms;
+        }
+        barrier();
+
+        inv_rms = s_data[0];
+
+        // Step 2: Normalize and scale with Gamma
+        for (uint i = tid; i < pc.dim; i += 64) {
+            Out[row_offset + i] = X[row_offset + i] * inv_rms * Gamma[i];
+        }
+
+    } else if (pc.mode == 1u) {
+        // --- BACKWARD PASS: dX ---
+        uint t = gl_WorkGroupID.x;
+        if (t >= pc.batch_seq) return;
+
+        uint row_offset = t * pc.dim;
+
+        // Step 1: Calculate sum(x^2) and sum(dOut * Gamma * x)
+        float thread_sum_x2 = 0.0;
+        float thread_sum_gx = 0.0;
+
+        for (uint i = tid; i < pc.dim; i += 64) {
+            float xi = X[row_offset + i];
+            float gi = dOut[row_offset + i] * Gamma[i];
+            thread_sum_x2 += xi * xi;
+            thread_sum_gx += gi * xi;
+        }
+        s_data[tid] = thread_sum_x2;
+        s_data2[tid] = thread_sum_gx;
+        barrier();
+
+        for (uint s = 32; s > 0; s >>= 1) {
+            if (tid < s) {
+                s_data[tid] += s_data[tid + s];
+                s_data2[tid] += s_data2[tid + s];
+            }
+            barrier();
+        }
+
+        float sum_x2 = s_data[0];
+        float sum_gx = s_data2[0];
+
+        float mean_sq = sum_x2 / float(pc.dim);
+        float var_eps = mean_sq + pc.eps;
+        float inv_rms = inversesqrt(var_eps);
+        float inv_rms3 = inv_rms / (float(pc.dim) * var_eps);
+
+        if (tid == 0) {
+            s_data[0] = inv_rms;
+            s_data2[0] = inv_rms3 * sum_gx;
+        }
+        barrier();
+
+        inv_rms = s_data[0];
+        float factor = s_data2[0];
+
+        // Step 2: Write dX
+        for (uint i = tid; i < pc.dim; i += 64) {
+            float xi = X[row_offset + i];
+            float gi = dOut[row_offset + i] * Gamma[i];
+            dX[row_offset + i] = inv_rms * gi - xi * factor;
+        }
+
+    } else if (pc.mode == 2u) {
+        // --- BACKWARD PASS: dGamma ---
+        // Each workgroup handles a slice of dimension elements
+        uint i = gl_GlobalInvocationID.x;
+        if (i >= pc.dim) return;
+
+        float sum_dgamma = 0.0;
+        for (uint t = 0; t < pc.batch_seq; ++t) {
+            uint row_offset = t * pc.dim;
+
+            // Compute rms of row t
+            // For numerical consistency, compute row rms
+            float xi = X[row_offset + i];
+            float dout = dOut[row_offset + i];
+
+            // In RMSNorm, dGamma[i] = sum_t dOut[t, i] * (X[t, i] / RMS(X_t))
+            // Note: Since Out[t, i] = (X[t, i] / RMS(X_t)) * Gamma[i],
+            // if Gamma[i] != 0, (X[t, i] / RMS(X_t)) is Out[t, i] / Gamma[i].
+            // To be completely robust when Gamma[i] is 0 or unscaled:
+            float sum_sq = 0.0;
+            for (uint k = 0; k < pc.dim; ++k) {
+                float val = X[row_offset + k];
+                sum_sq += val * val;
+            }
+            float inv_rms = inversesqrt(sum_sq / float(pc.dim) + pc.eps);
+            sum_dgamma += dout * (xi * inv_rms);
+        }
+
+        dGamma[i] = sum_dgamma;
+    }
+}

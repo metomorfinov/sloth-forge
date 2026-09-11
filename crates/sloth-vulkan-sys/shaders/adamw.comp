@@ -1,0 +1,68 @@
+#version 450
+
+// AdamW Optimizer Step:
+// Updates weights and moment states in-place directly on GPU buffers.
+//
+// Optimized for AMD Polaris 10 wavefront-64.
+// Workgroup size: (64, 1, 1) = 64 invocations (1 wavefront).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer WeightsBuf {
+    float weights[];
+};
+
+layout(std430, binding = 1) readonly buffer GradsBuf {
+    float grads[];
+};
+
+layout(std430, binding = 2) buffer MStateBuf {
+    float m_state[];
+};
+
+layout(std430, binding = 3) buffer VStateBuf {
+    float v_state[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    uint step;
+} pc;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.num_elements) return;
+
+    float w = weights[gid];
+    float g = grads[gid];
+    float m = m_state[gid];
+    float v = v_state[gid];
+
+    // Decoupled weight decay: w = w - lr * wd * w
+    w = w - pc.lr * pc.weight_decay * w;
+
+    // Update biased first moment estimate: m = beta1 * m + (1 - beta1) * g
+    m = pc.beta1 * m + (1.0 - pc.beta1) * g;
+    m_state[gid] = m;
+
+    // Update biased second raw moment estimate: v = beta2 * v + (1 - beta2) * (g * g)
+    v = pc.beta2 * v + (1.0 - pc.beta2) * (g * g);
+    v_state[gid] = v;
+
+    // Compute bias-corrected first and second moment estimates
+    float step_f = max(float(pc.step), 1.0);
+    float bc1 = 1.0 - pow(pc.beta1, step_f);
+    float bc2 = 1.0 - pow(pc.beta2, step_f);
+
+    float m_hat = m / max(bc1, 1e-8);
+    float v_hat = v / max(bc2, 1e-8);
+
+    // Apply update to weight: w = w - lr * m_hat / (sqrt(v_hat) + eps)
+    w = w - pc.lr * (m_hat / (sqrt(v_hat) + pc.eps));
+    weights[gid] = w;
+}

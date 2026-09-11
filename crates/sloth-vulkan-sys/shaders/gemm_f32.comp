@@ -1,0 +1,123 @@
+#version 450
+
+// Tiled GEMM: C = A * B
+// Matrix A: M x K
+// Matrix B: K x N
+// Matrix C: M x N
+//
+// Optimized for AMD Polaris (GCN 4.0 / gfx803) wavefront-64.
+// Workgroup size: (8, 8, 1) = 64 invocations (exactly 1 wavefront).
+// LDS tile size: 16 x 16 with 2x2 micro-tile per thread.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer MatrixA {
+    float A[];
+};
+
+layout(std430, binding = 1) readonly buffer MatrixB {
+    float B[];
+};
+
+layout(std430, binding = 2) writeonly buffer MatrixC {
+    float C[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint M;
+    uint K;
+    uint N;
+    uint lda;
+    uint ldb;
+    uint ldc;
+} pc;
+
+shared float tile_A[16][16];
+shared float tile_B[16][16];
+
+void main() {
+    uint tx = gl_LocalInvocationID.x; // 0..7
+    uint ty = gl_LocalInvocationID.y; // 0..7
+    uint tid = ty * 8 + tx;           // 0..63 (wavefront lane)
+
+    // Global tile base row and column
+    uint tile_row = gl_WorkGroupID.y * 16;
+    uint tile_col = gl_WorkGroupID.x * 16;
+
+    // Accumulators for 2x2 sub-tile per thread
+    float acc00 = 0.0;
+    float acc01 = 0.0;
+    float acc10 = 0.0;
+    float acc11 = 0.0;
+
+    // Each thread loads 4 elements of tile_A and 4 elements of tile_B per K-tile
+    // Mapping 64 threads to 16x16 (256 elements):
+    // 4 elements per thread along columns
+    uint load_row = tid / 4;          // 0..15
+    uint load_col = (tid % 4) * 4;    // 0, 4, 8, 12
+
+    uint num_tiles = (pc.K + 15) / 16;
+
+    for (uint t = 0; t < num_tiles; ++t) {
+        uint k_base = t * 16;
+
+        // Load 4 elements of A into LDS
+        uint a_global_r = tile_row + load_row;
+        for (uint i = 0; i < 4; ++i) {
+            uint a_global_c = k_base + load_col + i;
+            if (a_global_r < pc.M && a_global_c < pc.K) {
+                tile_A[load_row][load_col + i] = A[a_global_r * pc.lda + a_global_c];
+            } else {
+                tile_A[load_row][load_col + i] = 0.0;
+            }
+        }
+
+        // Load 4 elements of B into LDS
+        uint b_global_r = k_base + load_row;
+        for (uint i = 0; i < 4; ++i) {
+            uint b_global_c = tile_col + load_col + i;
+            if (b_global_r < pc.K && b_global_c < pc.N) {
+                tile_B[load_row][load_col + i] = B[b_global_r * pc.ldb + b_global_c];
+            } else {
+                tile_B[load_row][load_col + i] = 0.0;
+            }
+        }
+
+        barrier();
+
+        // Compute 2x2 micro-tile
+        uint r0 = ty * 2 + 0;
+        uint r1 = ty * 2 + 1;
+        uint c0 = tx * 2 + 0;
+        uint c1 = tx * 2 + 1;
+
+        for (uint k = 0; k < 16; ++k) {
+            float a0 = tile_A[r0][k];
+            float a1 = tile_A[r1][k];
+            float b0 = tile_B[k][c0];
+            float b1 = tile_B[k][c1];
+
+            acc00 += a0 * b0;
+            acc01 += a0 * b1;
+            acc10 += a1 * b0;
+            acc11 += a1 * b1;
+        }
+
+        barrier();
+    }
+
+    // Write back results to C with bounds checking
+    uint out_r0 = tile_row + ty * 2 + 0;
+    uint out_r1 = tile_row + ty * 2 + 1;
+    uint out_c0 = tile_col + tx * 2 + 0;
+    uint out_c1 = tile_col + tx * 2 + 1;
+
+    if (out_r0 < pc.M) {
+        if (out_c0 < pc.N) C[out_r0 * pc.ldc + out_c0] = acc00;
+        if (out_c1 < pc.N) C[out_r0 * pc.ldc + out_c1] = acc01;
+    }
+    if (out_r1 < pc.M) {
+        if (out_c0 < pc.N) C[out_r1 * pc.ldc + out_c0] = acc10;
+        if (out_c1 < pc.N) C[out_r1 * pc.ldc + out_c1] = acc11;
+    }
+}
