@@ -21,9 +21,15 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Install Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.2.0
-        with:
-          vulkan-query-version: 1.3.283.0
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+          $vulkanPath = "C:\VulkanSDK"
+          $latestVer = Get-ChildItem -Path $vulkanPath -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if ($latestVer) {
+            echo "VULKAN_SDK=$($latestVer.FullName)" >> $env:GITHUB_ENV
+            echo "$($latestVer.FullName)\Bin" >> $env:GITHUB_PATH
+          }
 
       - name: Setup Node.js & Build Frontend
         uses: actions/setup-node@v4
