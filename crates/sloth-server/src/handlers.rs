@@ -40,6 +40,7 @@ pub struct ModelsApiResponse {
     pub object: String,
     pub count: usize,
     pub models: Vec<crate::models::ModelCard>,
+    pub default_models: Vec<String>,
     pub data: Vec<OpenAIModelInfo>,
 }
 
@@ -136,6 +137,10 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<ModelsApi
         object: "list".to_string(),
         count,
         models: cards,
+        default_models: vec![
+            "llama-3.2-3b-instruct-q4_k_m".to_string(),
+            "llama-3.2-1b-instruct-q4_k_m".to_string(),
+        ],
         data: openai_data,
     })
 }
@@ -159,43 +164,7 @@ pub async fn handle_train_stop(
 pub async fn handle_train_status(
     State(state): State<Arc<AppState>>,
 ) -> Json<TrainStatusResponse> {
-    let is_active = state.training.is_active.load(Ordering::Relaxed);
-    let step = state.training.step.load(Ordering::Relaxed);
-    let total_steps = state.training.total_steps.load(Ordering::Relaxed);
-    let loss = *state.training.loss.read().await;
-    let tokens_per_sec = *state.training.tokens_per_sec.read().await;
-    let vram_used_mb = state.training.vram_used_mb.load(Ordering::Relaxed);
-    let epoch = state.training.epoch.load(Ordering::Relaxed);
-    let learning_rate = *state.training.learning_rate.read().await;
-    let status = state.training.status_text.read().await.clone();
-
-    let elapsed_secs = if let Some(start) = *state.training.start_time.read().await {
-        start.elapsed().as_secs()
-    } else {
-        0
-    };
-
-    let eta_secs = if is_active && step < total_steps {
-        let remaining = total_steps - step;
-        (remaining as f32 / 20.0).round() as u64
-    } else {
-        0
-    };
-
-    Json(TrainStatusResponse {
-        active: is_active,
-        status,
-        step,
-        total_steps,
-        loss,
-        tokens_per_sec,
-        vram_used_mb,
-        vram_total_mb: 4096,
-        elapsed_secs,
-        eta_secs,
-        epoch,
-        learning_rate,
-    })
+    Json(crate::api::build_training_status(&state).await)
 }
 
 pub async fn handle_ws_telemetry(

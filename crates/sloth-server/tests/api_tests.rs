@@ -392,3 +392,307 @@ async fn test_static_files_and_spa_fallback() {
     let resp = client.get(format!("{base_url}/assets/index-D1keva_w.css")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_unsloth_health_endpoint() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base_url}/api/health"))
+        .send()
+        .await
+        .expect("Failed to call /api/health");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let health: serde_json::Value = resp.json().await.unwrap();
+
+    assert_eq!(health["status"].as_str(), Some("ok"));
+    assert_eq!(health["version"].as_str(), Some("0.1.0"));
+    assert_eq!(health["device_type"].as_str(), Some("vulkan"));
+    let gpu_name = health["gpu_name"].as_str().unwrap();
+    assert!(gpu_name.contains("AMD Radeon RX 570"));
+    assert_eq!(health["vram_total_mb"].as_u64(), Some(4096));
+    assert_eq!(health["vram_free_mb"].as_u64(), Some(4096));
+    assert_eq!(health["vram_used_mb"].as_u64(), Some(0));
+    assert_eq!(health["cuda_available"].as_bool(), Some(false));
+    assert_eq!(health["rocm_available"].as_bool(), Some(false));
+    assert_eq!(health["vulkan_available"].as_bool(), Some(true));
+    assert_eq!(health["chat_only"].as_bool(), Some(false));
+
+    let capabilities = health["capabilities"].as_array().expect("capabilities array");
+    let caps: Vec<&str> = capabilities.iter().filter_map(|c| c.as_str()).collect();
+    assert!(caps.contains(&"train"));
+    assert!(caps.contains(&"chat"));
+    assert!(caps.contains(&"gguf"));
+    assert!(caps.contains(&"lora"));
+    assert!(caps.contains(&"cluster"));
+}
+
+#[tokio::test]
+async fn test_unsloth_auth_status_endpoint() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base_url}/api/auth/status"))
+        .send()
+        .await
+        .expect("Failed to call /api/auth/status");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let auth: serde_json::Value = resp.json().await.unwrap();
+
+    assert_eq!(auth["authenticated"].as_bool(), Some(true));
+    assert_eq!(auth["auth_required"].as_bool(), Some(false));
+    assert_eq!(auth["initialized"].as_bool(), Some(true));
+    assert_eq!(auth["requires_password_change"].as_bool(), Some(false));
+    assert_eq!(auth["user"]["username"].as_str(), Some("rivergod"));
+    assert_eq!(auth["user"]["role"].as_str(), Some("admin"));
+}
+
+#[tokio::test]
+async fn test_unsloth_models_and_model_picker_schema() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/models
+    let resp = client.get(format!("{base_url}/api/models")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    let models = body["models"].as_array().unwrap();
+    assert!(!models.is_empty());
+    let m0 = &models[0];
+    assert!(m0["id"].as_str().is_some());
+    assert!(m0["name"].as_str().is_some());
+    assert_eq!(m0["isGguf"].as_bool().or_else(|| m0["is_gguf"].as_bool()), Some(true));
+    assert_eq!(m0["isVision"].as_bool().or_else(|| m0["is_vision"].as_bool()), Some(false));
+    assert_eq!(m0["source"].as_str(), Some("models_dir"));
+
+    // 2. Check /api/models/list alias
+    let resp_list = client.get(format!("{base_url}/api/models/list")).send().await.unwrap();
+    assert_eq!(resp_list.status(), reqwest::StatusCode::OK);
+
+    // 3. Check /api/models/local alias
+    let resp_local = client.get(format!("{base_url}/api/models/local")).send().await.unwrap();
+    assert_eq!(resp_local.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_unsloth_training_status_and_progress_endpoints() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/train/status
+    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let status: serde_json::Value = resp.json().await.unwrap();
+
+    assert!(status["job_id"].as_str().is_some());
+    assert_eq!(status["phase"].as_str(), Some("idle"));
+    assert_eq!(status["is_training_running"].as_bool(), Some(false));
+    assert_eq!(status["eval_enabled"].as_bool(), Some(false));
+    assert!(status["message"].as_str().is_some());
+    assert!(status["warnings"].as_array().is_some());
+
+    // 2. GET /api/train/progress as JSON
+    let resp = client.get(format!("{base_url}/api/train/progress")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let prog: serde_json::Value = resp.json().await.unwrap();
+    assert!(prog["job_id"].as_str().is_some());
+    assert_eq!(prog["phase"].as_str(), Some("idle"));
+
+    // 3. GET /api/train/progress with text/event-stream header
+    let resp = client
+        .get(format!("{base_url}/api/train/progress?expected_job_id=test-job-123"))
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
+    assert!(ct.contains("text/event-stream"));
+}
+
+#[tokio::test]
+async fn test_unsloth_training_start_stop_reset() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Start with Unsloth request payload format (snake_case, string lr)
+    let start_payload = serde_json::json!({
+        "model_name": "Llama-3.2-3B-Instruct",
+        "hf_dataset": "yahma/alpaca-cleaned",
+        "project_name": "test-project",
+        "training_type": "sft",
+        "learning_rate": "2e-4",
+        "lora_r": 16,
+        "lora_alpha": 32.0,
+        "batch_size": 1,
+        "gradient_accumulation_steps": 4,
+        "max_steps": 50,
+        "start_request_id": "req-unsloth-001"
+    });
+
+    let resp = client
+        .post(format!("{base_url}/api/train/start"))
+        .json(&start_payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let start_resp: serde_json::Value = resp.json().await.unwrap();
+    assert!(start_resp["job_id"].as_str().is_some() || start_resp["jobId"].as_str().is_some());
+    assert_eq!(start_resp["status"].as_str(), Some("started"));
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Check status is training
+    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
+    let status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status["is_training_running"].as_bool(), Some(true));
+    assert_eq!(status["phase"].as_str(), Some("training"));
+
+    // Stop
+    let resp = client.post(format!("{base_url}/api/train/stop")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let stop_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(stop_resp["status"].as_str(), Some("stopped"));
+
+    // Reset
+    let resp = client.post(format!("{base_url}/api/train/reset")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let reset_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(reset_resp["status"].as_str(), Some("ok"));
+
+    // Status after reset should be idle
+    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
+    let status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status["is_training_running"].as_bool(), Some(false));
+    assert_eq!(status["phase"].as_str(), Some("idle"));
+    assert_eq!(status["step"].as_u64(), Some(0));
+}
+
+#[tokio::test]
+async fn test_unsloth_training_runs_history() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Initial GET /api/train/runs
+    let resp = client.get(format!("{base_url}/api/train/runs")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["runs"].as_array().is_some());
+    assert!(body["total"].as_u64().is_some());
+
+    // 2. Start a run
+    let start_payload = serde_json::json!({
+        "model_name": "Llama-3.2-3B-Instruct",
+        "dataset": "sloth-alpaca",
+        "total_steps": 25,
+        "mode": "beginner",
+        "preset": "style"
+    });
+    let _ = client.post(format!("{base_url}/api/train/start")).json(&start_payload).send().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = client.post(format!("{base_url}/api/train/stop")).send().await.unwrap();
+
+    // 3. GET /api/train/runs should now contain the run
+    let resp = client.get(format!("{base_url}/api/train/runs")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let runs = body["runs"].as_array().unwrap();
+    assert!(!runs.is_empty());
+    let run = &runs[0];
+    assert!(run["id"].as_str().is_some());
+    assert_eq!(run["status"].as_str(), Some("stopped"));
+    assert!(run["started_at"].as_str().is_some());
+
+    // 4. GET /api/train/runs/:id detail
+    let run_id = run["id"].as_str().unwrap();
+    let resp = client.get(format!("{base_url}/api/train/runs/{run_id}")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let detail: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(detail["run"]["id"].as_str(), Some(run_id));
+    assert!(detail["config"].is_object());
+    assert!(detail["metrics"].is_object());
+}
+
+#[tokio::test]
+async fn test_unsloth_inference_chat_sse() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let chat_payload = serde_json::json!({
+        "model": "slothforge-llama-3.2-3b",
+        "messages": [
+            {"role": "user", "content": "How does SlothForge run on Polaris?"}
+        ],
+        "stream": true
+    });
+
+    // POST /api/inference/chat
+    let resp = client
+        .post(format!("{base_url}/api/inference/chat"))
+        .json(&chat_payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
+    assert!(ct.contains("text/event-stream"));
+
+    let body_text = resp.text().await.unwrap();
+    assert!(body_text.contains("chat.completion.chunk"));
+    assert!(body_text.contains("[DONE]"));
+
+    // POST /api/inference/chat/completions (non-stream)
+    let non_stream_payload = serde_json::json!({
+        "model": "slothforge-llama-3.2-3b",
+        "messages": [
+            {"role": "user", "content": "Vulkan compute"}
+        ],
+        "stream": false
+    });
+    let resp = client
+        .post(format!("{base_url}/api/inference/chat/completions"))
+        .json(&non_stream_payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let chat_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(chat_resp["object"].as_str(), Some("chat.completion"));
+}
+
+#[tokio::test]
+async fn test_unsloth_studio_install_source_and_update_status() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/studio/install-source
+    let resp = client
+        .get(format!("{base_url}/api/studio/install-source"))
+        .send()
+        .await
+        .expect("Failed to call /api/studio/install-source");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let src: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(src["source"].as_str(), Some("native"));
+    assert_eq!(src["channel"].as_str(), Some("stable"));
+
+    // 2. GET /api/studio/update-status
+    let resp = client
+        .get(format!("{base_url}/api/studio/update-status"))
+        .send()
+        .await
+        .expect("Failed to call /api/studio/update-status");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let update: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(update["update_available"].as_bool(), Some(false));
+    assert_eq!(update["current_version"].as_str(), Some("0.1.0"));
+}

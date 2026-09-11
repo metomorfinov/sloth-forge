@@ -4,8 +4,69 @@ use sloth_vulkan_sys::VulkanContext;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
+
+pub fn iso_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    let rem_secs = secs % 86400;
+    let hours = rem_secs / 3600;
+    let minutes = (rem_secs % 3600) / 60;
+    let seconds = rem_secs % 60;
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let leap = if (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) { 1 } else { 0 };
+        let days_in_year = 365 + leap;
+        if d >= days_in_year {
+            d -= days_in_year;
+            y += 1;
+        } else {
+            let days_in_months = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            let mut m = 1;
+            for dim in days_in_months {
+                if d >= dim {
+                    d -= dim;
+                    m += 1;
+                } else {
+                    break;
+                }
+            }
+            let day = d + 1;
+            return format!("{y:04}-{m:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingRunSummary {
+    pub id: String,
+    pub status: String,
+    pub model_name: String,
+    pub project_name: Option<String>,
+    pub dataset_name: String,
+    pub display_name: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub total_steps: Option<u32>,
+    pub final_step: Option<u32>,
+    pub final_loss: Option<f32>,
+    pub output_dir: Option<String>,
+    pub can_resume: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_blocked_reason: Option<String>,
+    pub resumed_later: bool,
+    pub has_preview_model: bool,
+    pub preview_ref: Option<String>,
+    pub preview_sig: Option<String>,
+    pub duration_seconds: Option<u64>,
+    pub error_message: Option<String>,
+    pub loss_sparkline: Option<Vec<f32>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +122,13 @@ pub struct TrainingSession {
     pub start_time: Arc<RwLock<Option<Instant>>>,
     pub stop_tx: Arc<RwLock<Option<watch::Sender<bool>>>>,
     pub loss_history: Arc<RwLock<Vec<LossHistoryEntry>>>,
+    pub current_job_id: Arc<RwLock<String>>,
+    pub current_start_request_id: Arc<RwLock<Option<String>>>,
+    pub current_run: Arc<RwLock<Option<TrainingRunSummary>>>,
+    pub runs: Arc<RwLock<Vec<TrainingRunSummary>>>,
+    pub model_name: Arc<RwLock<String>>,
+    pub dataset_name: Arc<RwLock<String>>,
+    pub project_name: Arc<RwLock<Option<String>>>,
 }
 
 impl TrainingSession {
@@ -78,6 +146,13 @@ impl TrainingSession {
             start_time: Arc::new(RwLock::new(None)),
             stop_tx: Arc::new(RwLock::new(None)),
             loss_history: Arc::new(RwLock::new(Vec::new())),
+            current_job_id: Arc::new(RwLock::new("job-default".to_string())),
+            current_start_request_id: Arc::new(RwLock::new(None)),
+            current_run: Arc::new(RwLock::new(None)),
+            runs: Arc::new(RwLock::new(Vec::new())),
+            model_name: Arc::new(RwLock::new("slothforge-llama-3.2-3b".to_string())),
+            dataset_name: Arc::new(RwLock::new("default_dataset".to_string())),
+            project_name: Arc::new(RwLock::new(None)),
         }
     }
 

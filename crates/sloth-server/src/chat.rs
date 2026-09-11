@@ -15,7 +15,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct ChatCompletionRequest {
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default)]
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub prompt: Option<String>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -33,7 +36,32 @@ fn default_model() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: serde_json::Value,
+}
+
+impl ChatMessage {
+    pub fn new_user(text: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: serde_json::Value::String(text.into()),
+        }
+    }
+
+    pub fn text_content(&self) -> String {
+        if let Some(s) = self.content.as_str() {
+            return s.to_string();
+        }
+        if let Some(arr) = self.content.as_array() {
+            let mut out = String::new();
+            for item in arr {
+                if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                    out.push_str(t);
+                }
+            }
+            return out;
+        }
+        self.content.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,9 +75,15 @@ pub struct ChatCompletionResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ChatChoiceMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatChoice {
     pub index: usize,
-    pub message: ChatMessage,
+    pub message: ChatChoiceMessage,
     pub finish_reason: String,
 }
 
@@ -65,7 +99,7 @@ pub fn generate_response_text(messages: &[ChatMessage]) -> String {
         .iter()
         .rev()
         .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
+        .map(|m| m.text_content())
         .unwrap_or_else(|| "Hello".to_string());
 
     let q = last_user_msg.to_lowercase();
@@ -102,13 +136,18 @@ pub async fn handle_chat_completions(
         .as_secs();
 
     let id = format!("chatcmpl-{now}");
-    let response_text = generate_response_text(&payload.messages);
+    let mut messages = payload.messages;
+    if messages.is_empty() {
+        if let Some(p) = payload.prompt {
+            messages.push(ChatMessage::new_user(p));
+        }
+    }
+    let response_text = generate_response_text(&messages);
     let is_stream = payload.stream.unwrap_or(false);
 
-    let prompt_tokens = payload
-        .messages
+    let prompt_tokens = messages
         .iter()
-        .map(|m| m.content.split_whitespace().count() * 2)
+        .map(|m| m.text_content().split_whitespace().count() * 2)
         .sum::<usize>()
         .max(4);
     let completion_tokens = (response_text.split_whitespace().count() * 2).max(6);
@@ -121,7 +160,7 @@ pub async fn handle_chat_completions(
             model: payload.model,
             choices: vec![ChatChoice {
                 index: 0,
-                message: ChatMessage {
+                message: ChatChoiceMessage {
                     role: "assistant".to_string(),
                     content: response_text,
                 },

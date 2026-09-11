@@ -4,26 +4,115 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ModelCard {
     pub id: String,
     pub name: String,
+    pub display_name: String,
+    #[serde(rename = "displayName")]
+    pub display_name_camel: String,
     pub filename: String,
     pub path: String,
     pub size_bytes: u64,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes_camel: u64,
     pub size_formatted: String,
+    #[serde(rename = "sizeFormatted")]
+    pub size_formatted_camel: String,
+    pub device_size: String,
+    #[serde(rename = "deviceSize")]
+    pub device_size_camel: String,
+    pub device_size_bytes: u64,
+    #[serde(rename = "deviceSizeBytes")]
+    pub device_size_bytes_camel: u64,
     pub parameters: String,
     pub quantization: String,
+    pub device_quant: String,
+    #[serde(rename = "deviceQuant")]
+    pub device_quant_camel: String,
     pub context_length: u64,
+    #[serde(rename = "contextLength")]
+    pub context_length_camel: u64,
     pub architecture: String,
     pub is_present: bool,
+    #[serde(rename = "isPresent")]
+    pub is_present_camel: bool,
+    pub is_gguf: bool,
+    #[serde(rename = "isGguf")]
+    pub is_gguf_camel: bool,
+    pub is_vision: bool,
+    #[serde(rename = "isVision")]
+    pub is_vision_camel: bool,
+    pub is_lora: bool,
+    #[serde(rename = "isLora")]
+    pub is_lora_camel: bool,
+    pub is_audio: bool,
+    #[serde(rename = "isAudio")]
+    pub is_audio_camel: bool,
+    pub source: String,
     pub recommended_vram_mb: u64,
+    #[serde(rename = "recommendedVramMb")]
+    pub recommended_vram_mb_camel: u64,
+}
+
+impl ModelCard {
+    pub fn new(
+        id: String,
+        name: String,
+        filename: String,
+        path: String,
+        size_bytes: u64,
+        parameters: String,
+        quantization: String,
+        context_length: u64,
+        architecture: String,
+        is_present: bool,
+        recommended_vram_mb: u64,
+    ) -> Self {
+        let size_formatted = format_bytes(size_bytes);
+        Self {
+            id: id.clone(),
+            name: name.clone(),
+            display_name: name.clone(),
+            display_name_camel: name,
+            filename,
+            path,
+            size_bytes,
+            size_bytes_camel: size_bytes,
+            size_formatted: size_formatted.clone(),
+            size_formatted_camel: size_formatted.clone(),
+            device_size: size_formatted.clone(),
+            device_size_camel: size_formatted,
+            device_size_bytes: size_bytes,
+            device_size_bytes_camel: size_bytes,
+            parameters,
+            quantization: quantization.clone(),
+            device_quant: quantization.clone(),
+            device_quant_camel: quantization,
+            context_length,
+            context_length_camel: context_length,
+            architecture,
+            is_present,
+            is_present_camel: is_present,
+            is_gguf: true,
+            is_gguf_camel: true,
+            is_vision: false,
+            is_vision_camel: false,
+            is_lora: false,
+            is_lora_camel: false,
+            is_audio: false,
+            is_audio_camel: false,
+            source: "models_dir".to_string(),
+            recommended_vram_mb,
+            recommended_vram_mb_camel: recommended_vram_mb,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelListResponse {
     pub object: String,
     pub models: Vec<ModelCard>,
+    pub default_models: Vec<String>,
     pub data: Vec<OpenAIModelInfo>,
 }
 
@@ -68,53 +157,51 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelCard> {
                             let id = filename.trim_end_matches(".gguf").to_lowercase();
                             let name = filename.trim_end_matches(".gguf").to_string();
 
-                            discovered.push(ModelCard {
-                                id: id.clone(),
+                            discovered.push(ModelCard::new(
+                                id,
                                 name,
-                                filename: filename.clone(),
-                                path: path.to_string_lossy().to_string(),
+                                filename.clone(),
+                                path.to_string_lossy().to_string(),
                                 size_bytes,
-                                size_formatted: format_bytes(size_bytes),
-                                parameters: if size_bytes > 3_000_000_000 {
+                                if size_bytes > 3_000_000_000 {
                                     "7B".to_string()
                                 } else if size_bytes > 1_500_000_000 {
                                     "3.2B".to_string()
                                 } else {
                                     "1.5B".to_string()
                                 },
-                                quantization: if filename.contains("Q4_K") {
+                                if filename.contains("Q4_K") {
                                     "Q4_K_M".to_string()
                                 } else if filename.contains("Q8_0") {
                                     "Q8_0".to_string()
                                 } else {
                                     "Q4_0".to_string()
                                 },
-                                context_length: ctx_len,
-                                architecture: arch,
-                                is_present: true,
-                                recommended_vram_mb: if size_bytes > 3_000_000_000 {
+                                ctx_len,
+                                arch,
+                                true,
+                                if size_bytes > 3_000_000_000 {
                                     3800
                                 } else {
                                     2600
                                 },
-                            });
+                            ));
                         } else {
                             // Fallback file info if GGUF parse failed
                             let id = filename.trim_end_matches(".gguf").to_lowercase();
-                            discovered.push(ModelCard {
-                                id: id.clone(),
-                                name: filename.trim_end_matches(".gguf").to_string(),
-                                filename: filename.clone(),
-                                path: path.to_string_lossy().to_string(),
+                            discovered.push(ModelCard::new(
+                                id,
+                                filename.trim_end_matches(".gguf").to_string(),
+                                filename.clone(),
+                                path.to_string_lossy().to_string(),
                                 size_bytes,
-                                size_formatted: format_bytes(size_bytes),
-                                parameters: "Unknown".to_string(),
-                                quantization: "Q4_K_M".to_string(),
-                                context_length: 8192,
-                                architecture: "llama".to_string(),
-                                is_present: true,
-                                recommended_vram_mb: 2600,
-                            });
+                                "Unknown".to_string(),
+                                "Q4_K_M".to_string(),
+                                8192,
+                                "llama".to_string(),
+                                true,
+                                2600,
+                            ));
                         }
                     }
                 }
@@ -174,20 +261,19 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelCard> {
         if !found_filenames.contains(filename) {
             let model_path = models_dir.join(filename);
             let is_present = model_path.exists();
-            discovered.push(ModelCard {
-                id: id.to_string(),
-                name: name.to_string(),
-                filename: filename.to_string(),
-                path: model_path.to_string_lossy().to_string(),
-                size_bytes: size,
-                size_formatted: format_bytes(size),
-                parameters: params.to_string(),
-                quantization: quant.to_string(),
-                context_length: ctx,
-                architecture: arch.to_string(),
+            discovered.push(ModelCard::new(
+                id.to_string(),
+                name.to_string(),
+                filename.to_string(),
+                model_path.to_string_lossy().to_string(),
+                size,
+                params.to_string(),
+                quant.to_string(),
+                ctx,
+                arch.to_string(),
                 is_present,
-                recommended_vram_mb: vram,
-            });
+                vram,
+            ));
         }
     }
 

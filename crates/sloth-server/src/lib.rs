@@ -1,3 +1,4 @@
+pub mod api;
 pub mod chat;
 pub mod cluster;
 pub mod handlers;
@@ -32,12 +33,39 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
 
     // API Routes (/api/*)
     let api_router = Router::new()
-        .route("/vram", get(handle_vram))
-        .route("/hardware", get(handle_hardware))
+        // Unsloth Core Health & Auth
+        .route("/health", get(api::handle_health))
+        .route("/auth/status", get(api::handle_auth_status))
+        .route("/studio/install-source", get(api::handle_install_source))
+        .route("/studio/update-status", get(api::handle_update_status))
+        // Model Endpoints
         .route("/models", get(handle_models))
+        .route("/models/list", get(handle_models))
+        .route("/models/local", get(handle_models))
+        .route("/models/check-vision/:id", get(api::handle_check_vision))
+        .route("/models/check-embedding/:id", get(api::handle_check_embedding))
+        .route("/models/config/:id", get(api::handle_model_config))
+        // Training Endpoints
+        .route("/train/status", get(api::handle_train_status))
+        .route("/train/progress", get(api::handle_train_progress).post(api::handle_train_progress))
         .route("/train/start", post(handle_train_start))
         .route("/train/stop", post(handle_train_stop))
-        .route("/train/status", get(handle_train_status))
+        .route("/train/reset", post(api::handle_train_reset))
+        .route("/train/runs", get(api::handle_train_runs))
+        .route("/train/runs/:id", get(api::handle_train_run_detail))
+        .route("/train/metrics", get(api::handle_train_metrics))
+        .route("/train/start-requests/:id/acknowledge", post(api::handle_start_request_ack))
+        .route("/train/start-requests/:id/cancel", post(api::handle_start_request_cancel))
+        .route("/train/hardware", get(handle_hardware))
+        // Chat & Inference Endpoints
+        .route("/inference/chat", post(chat::handle_chat_completions))
+        .route("/inference/chat/completions", post(chat::handle_chat_completions))
+        // System & Hardware Endpoints
+        .route("/system", get(api::handle_system))
+        .route("/system/hardware", get(api::handle_system_hardware))
+        .route("/vram", get(handle_vram))
+        .route("/hardware", get(handle_hardware))
+        // Cluster Endpoints
         .route("/cluster/worker/register", post(cluster::handle_register_worker))
         .route("/cluster/sync_grad", post(cluster::handle_sync_grad))
         .route("/cluster/status", get(cluster::handle_cluster_status));

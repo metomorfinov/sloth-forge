@@ -7,6 +7,39 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::info;
 
+fn deserialize_lr_opt<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64().map(|v| v as f32)),
+        Some(serde_json::Value::String(s)) => {
+            if let Ok(v) = s.parse::<f32>() {
+                Ok(Some(v))
+            } else {
+                Ok(Some(0.0002))
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn deserialize_gc_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => {
+            let lower = s.to_lowercase();
+            Ok(Some(lower == "true" || lower == "unsloth"))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainStartRequest {
@@ -14,59 +47,79 @@ pub struct TrainStartRequest {
     pub mode: Option<String>,
 
     // Beginner preset fields
-    #[serde(alias = "preset_id", alias = "preset")]
+    #[serde(default, alias = "preset_id", alias = "preset")]
     pub preset: Option<String>,
-    #[serde(alias = "human_intensity", alias = "intensity")]
+    #[serde(default, alias = "human_intensity", alias = "intensity")]
     pub intensity: Option<serde_json::Value>,
 
-    // Pro hyperparameters
-    #[serde(alias = "lora_rank")]
+    // Hyperparameters
+    #[serde(default, alias = "lora_rank", alias = "lora_r", alias = "loraR")]
     pub lora_rank: Option<usize>,
-    #[serde(alias = "lora_alpha")]
+    #[serde(default, alias = "lora_alpha", alias = "loraAlpha")]
     pub lora_alpha: Option<f32>,
-    #[serde(alias = "lora_dropout")]
+    #[serde(default, alias = "lora_dropout", alias = "loraDropout")]
     pub lora_dropout: Option<f32>,
-    #[serde(alias = "target_modules")]
+    #[serde(default, alias = "target_modules", alias = "targetModules")]
     pub target_modules: Option<Vec<String>>,
-    #[serde(alias = "micro_batch_size")]
+    #[serde(default, alias = "micro_batch_size", alias = "batch_size", alias = "batchSize")]
     pub micro_batch_size: Option<usize>,
-    #[serde(alias = "gradient_accumulation")]
+    #[serde(default, alias = "gradient_accumulation", alias = "gradient_accumulation_steps", alias = "gradientAccumulationSteps")]
     pub gradient_accumulation: Option<usize>,
-    #[serde(alias = "max_seq_length")]
+    #[serde(default, alias = "max_seq_length", alias = "maxSeqLength")]
     pub max_seq_length: Option<usize>,
-    #[serde(alias = "sequence_packing")]
+    #[serde(default, alias = "sequence_packing", alias = "packing")]
     pub sequence_packing: Option<bool>,
+    #[serde(default, alias = "optim", alias = "optimizer")]
     pub optimizer: Option<String>,
-    #[serde(alias = "learning_rate")]
+    #[serde(default, alias = "learning_rate", alias = "learningRate", deserialize_with = "deserialize_lr_opt")]
     pub learning_rate: Option<f32>,
-    #[serde(alias = "weight_decay")]
+    #[serde(default, alias = "weight_decay", alias = "weightDecay")]
     pub weight_decay: Option<f32>,
-    #[serde(alias = "lr_schedule")]
+    #[serde(default, alias = "lr_schedule", alias = "lr_scheduler_type", alias = "lrSchedulerType")]
     pub lr_schedule: Option<String>,
-    #[serde(alias = "warmup_ratio")]
+    #[serde(default, alias = "warmup_ratio", alias = "warmupRatio")]
     pub warmup_ratio: Option<f32>,
-    #[serde(alias = "gradient_checkpointing")]
+    #[serde(default, alias = "gradient_checkpointing", alias = "gradientCheckpointing", deserialize_with = "deserialize_gc_opt")]
     pub gradient_checkpointing: Option<bool>,
-    #[serde(alias = "base_model")]
+    #[serde(default, alias = "base_model", alias = "model_name", alias = "modelName", alias = "model")]
     pub base_model: Option<String>,
-    #[serde(alias = "dataset_path")]
+    #[serde(default, alias = "dataset_path", alias = "hf_dataset", alias = "dataset")]
     pub dataset_path: Option<String>,
+    #[serde(default, alias = "project_name", alias = "projectName")]
+    pub project_name: Option<String>,
+    #[serde(default, alias = "num_epochs", alias = "epochs")]
     pub epochs: Option<u32>,
-    #[serde(alias = "total_steps")]
+    #[serde(default, alias = "total_steps", alias = "max_steps", alias = "totalSteps", alias = "maxSteps")]
     pub total_steps: Option<u32>,
+    #[serde(default, alias = "start_request_id", alias = "startRequestId")]
+    pub start_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TrainStartResponse {
-    pub status: String,
+    pub job_id: String,
+    #[serde(rename = "jobId")]
+    pub job_id_camel: String,
     pub session_id: String,
+    #[serde(rename = "sessionId")]
+    pub session_id_camel: String,
+    pub status: String,
+    pub message: String,
+    pub error: Option<String>,
+    pub error_code: Option<String>,
     pub total_steps: u32,
+    #[serde(rename = "totalSteps")]
+    pub total_steps_camel: u32,
     pub mode: String,
     pub lora_rank: usize,
+    #[serde(rename = "loraRank")]
+    pub lora_rank_camel: usize,
     pub lora_alpha: f32,
+    #[serde(rename = "loraAlpha")]
+    pub lora_alpha_camel: f32,
     pub learning_rate: f32,
-    pub message: String,
+    #[serde(rename = "learningRate")]
+    pub learning_rate_camel: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,8 +132,51 @@ pub struct TrainStopResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TrainStatusResponse {
+pub struct TrainResetResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingDetails {
+    pub epoch: u32,
+    pub step: u32,
+    pub total_steps: u32,
+    pub loss: f32,
+    pub learning_rate: f32,
+    pub output_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingMetricHistory {
+    pub steps: Vec<u32>,
+    pub loss: Vec<f32>,
+    pub lr: Vec<f32>,
+    pub grad_norm: Vec<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grad_norm_steps: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub eval_loss: Vec<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub eval_steps: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingStatusResponse {
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_request_state: Option<String>,
+    pub phase: String,
+    pub is_training_running: bool,
+    pub eval_enabled: bool,
+    pub message: String,
+    pub error: Option<String>,
+    pub warnings: Vec<String>,
+    pub details: Option<TrainingDetails>,
+    pub metric_history: Option<TrainingMetricHistory>,
+
+    // Compatibility fields
     pub active: bool,
     pub status: String,
     pub step: u32,
@@ -94,6 +190,8 @@ pub struct TrainStatusResponse {
     pub epoch: u32,
     pub learning_rate: f32,
 }
+
+pub type TrainStatusResponse = TrainingStatusResponse;
 
 pub struct ResolvedHyperparams {
     pub rank: usize,
@@ -257,6 +355,39 @@ pub async fn start_training(
 
     let params = resolve_hyperparameters(&req);
     let session_id = format!("train-{}", Instant::now().elapsed().as_nanos());
+    let job_id = format!("job-{}", session_id);
+    *state.training.current_job_id.write().await = job_id.clone();
+    *state.training.current_start_request_id.write().await = req.start_request_id.clone();
+    *state.training.model_name.write().await = req.base_model.clone().unwrap_or_else(|| "slothforge-llama-3.2-3b".to_string());
+    *state.training.dataset_name.write().await = req.dataset_path.clone().unwrap_or_else(|| "default_dataset".to_string());
+    *state.training.project_name.write().await = req.project_name.clone();
+
+    let run_summary = crate::state::TrainingRunSummary {
+        id: job_id.clone(),
+        status: "running".to_string(),
+        model_name: state.training.model_name.read().await.clone(),
+        project_name: req.project_name.clone(),
+        dataset_name: state.training.dataset_name.read().await.clone(),
+        display_name: Some("SlothForge Training Run".to_string()),
+        started_at: crate::state::iso_now(),
+        ended_at: None,
+        total_steps: Some(params.total_steps),
+        final_step: None,
+        final_loss: None,
+        output_dir: Some("outputs/slothforge-lora".to_string()),
+        can_resume: false,
+        resume_blocked_reason: None,
+        resumed_later: false,
+        has_preview_model: false,
+        preview_ref: None,
+        preview_sig: None,
+        duration_seconds: None,
+        error_message: None,
+        loss_sparkline: Some(Vec::new()),
+    };
+
+    *state.training.current_run.write().await = Some(run_summary.clone());
+    state.training.runs.write().await.push(run_summary);
 
     // Reset session state
     state.training.is_active.store(true, Ordering::SeqCst);
@@ -300,14 +431,23 @@ pub async fn start_training(
     });
 
     Ok(TrainStartResponse {
+        job_id: job_id.clone(),
+        job_id_camel: job_id,
+        session_id: session_id.clone(),
+        session_id_camel: session_id,
         status: "started".to_string(),
-        session_id,
         total_steps: params.total_steps,
+        total_steps_camel: params.total_steps,
         mode: params.mode_name,
         lora_rank: params.rank,
+        lora_rank_camel: params.rank,
         lora_alpha: params.alpha,
+        lora_alpha_camel: params.alpha,
         learning_rate: params.learning_rate,
+        learning_rate_camel: params.learning_rate,
         message: "Asynchronous LoRA training task successfully initialized with Vulkan GPU acceleration.".to_string(),
+        error: None,
+        error_code: None,
     })
 }
 
@@ -322,6 +462,21 @@ pub async fn stop_training(state: Arc<AppState>) -> TrainStopResponse {
 
     *state.training.status_text.write().await = "idle".to_string();
 
+    if let Some(ref mut run) = *state.training.current_run.write().await {
+        run.status = "stopped".to_string();
+        run.final_step = Some(current_step);
+        run.final_loss = Some(current_loss);
+        run.ended_at = Some(crate::state::iso_now());
+        let dur = state.training.start_time.read().await.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        run.duration_seconds = Some(dur);
+        run.loss_sparkline = Some(state.training.loss_history.read().await.iter().map(|e| e.loss).collect());
+
+        let mut runs = state.training.runs.write().await;
+        if let Some(pos) = runs.iter().position(|r| r.id == run.id) {
+            runs[pos] = run.clone();
+        }
+    }
+
     let _ = state.tx_telemetry.send(WsTelemetryEnvelope::Log {
         message: format!("[TRAIN] Training stopped at step {current_step}. Final loss: {current_loss:.4}"),
     });
@@ -331,6 +486,23 @@ pub async fn stop_training(state: Arc<AppState>) -> TrainStopResponse {
         step: current_step,
         loss: current_loss,
         message: "Training session successfully halted.".to_string(),
+    }
+}
+
+pub async fn reset_training(state: Arc<AppState>) -> TrainResetResponse {
+    let _ = stop_training(state.clone()).await;
+    state.training.is_active.store(false, Ordering::SeqCst);
+    state.training.step.store(0, Ordering::SeqCst);
+    state.training.epoch.store(1, Ordering::SeqCst);
+    *state.training.status_text.write().await = "idle".to_string();
+    *state.training.loss.write().await = 2.85;
+    state.training.loss_history.write().await.clear();
+    *state.training.start_time.write().await = None;
+    *state.training.current_job_id.write().await = "job-default".to_string();
+    *state.training.current_start_request_id.write().await = None;
+
+    TrainResetResponse {
+        status: "ok".to_string(),
     }
 }
 
@@ -492,6 +664,21 @@ async fn run_training_loop(
     state.training.is_active.store(false, Ordering::SeqCst);
     if current_step >= total_steps {
         *state.training.status_text.write().await = "completed".to_string();
+        let cur_loss = *state.training.loss.read().await;
+        if let Some(ref mut run) = *state.training.current_run.write().await {
+            run.status = "completed".to_string();
+            run.final_step = Some(current_step);
+            run.final_loss = Some(cur_loss);
+            run.ended_at = Some(crate::state::iso_now());
+            let dur = state.training.start_time.read().await.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            run.duration_seconds = Some(dur);
+            run.loss_sparkline = Some(state.training.loss_history.read().await.iter().map(|e| e.loss).collect());
+
+            let mut runs = state.training.runs.write().await;
+            if let Some(pos) = runs.iter().position(|r| r.id == run.id) {
+                runs[pos] = run.clone();
+            }
+        }
         let _ = state.tx_telemetry.send(WsTelemetryEnvelope::Log {
             message: format!("[TRAIN] LoRA training completed successfully across {total_steps} steps."),
         });
