@@ -696,3 +696,367 @@ async fn test_unsloth_studio_install_source_and_update_status() {
     assert_eq!(update["update_available"].as_bool(), Some(false));
     assert_eq!(update["current_version"].as_str(), Some("0.1.0"));
 }
+
+#[tokio::test]
+async fn test_inference_status_and_monitor() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/inference/status
+    let resp = client
+        .get(format!("{base_url}/api/inference/status"))
+        .send()
+        .await
+        .expect("Failed to call /api/inference/status");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status["active_model"].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
+    assert_eq!(status["model_identifier"].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
+    assert_eq!(status["is_vision"].as_bool(), Some(false));
+    assert_eq!(status["is_gguf"].as_bool(), Some(true));
+    assert_eq!(status["is_local_model"].as_bool(), Some(true));
+    assert_eq!(status["loading"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(status["loaded"][0].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
+    assert_eq!(status["context_length"].as_u64(), Some(131072));
+    assert_eq!(status["supports_tools"].as_bool(), Some(false));
+
+    // 2. GET /api/inference/monitor
+    let resp = client
+        .get(format!("{base_url}/api/inference/monitor"))
+        .send()
+        .await
+        .expect("Failed to call /api/inference/monitor");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let monitor: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(monitor["total"].as_u64(), Some(0));
+    assert_eq!(monitor["entries"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn test_hub_inventory_and_variants() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. GET /api/hub/cached-models
+    let resp = client
+        .get(format!("{base_url}/api/hub/cached-models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["cached"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["total_size_bytes"].as_u64(), Some(0));
+
+    // 2. GET /api/hub/cached-gguf
+    let resp = client
+        .get(format!("{base_url}/api/hub/cached-gguf"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["cached"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["total_size_bytes"].as_u64(), Some(0));
+
+    // 3. GET /api/hub/local
+    let resp = client
+        .get(format!("{base_url}/api/hub/local"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["models"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["count"].as_u64(), Some(0));
+
+    // 4. GET /api/hub/hidden-models
+    let resp = client
+        .get(format!("{base_url}/api/hub/hidden-models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["hidden_models"].as_array().map(|a| a.len()), Some(0));
+
+    // 5. GET /api/hub/active-downloads
+    let resp = client
+        .get(format!("{base_url}/api/hub/active-downloads"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["downloads"].as_array().map(|a| a.len()), Some(0));
+
+    // 6. GET /api/hub/gguf-variants
+    let repo_id = "unsloth/Llama-3.2-3B-Instruct-GGUF";
+    let resp = client
+        .get(format!("{base_url}/api/hub/gguf-variants?repo_id={repo_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["repo_id"].as_str(), Some(repo_id));
+    assert_eq!(body["has_vision"].as_bool(), Some(false));
+    assert_eq!(body["default_variant"].as_str(), Some("Q4_K_M"));
+    let variants = body["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0]["filename"].as_str(), Some("model-Q4_K_M.gguf"));
+    assert_eq!(variants[0]["quant"].as_str(), Some("Q4_K_M"));
+    assert_eq!(variants[0]["display_label"].as_str(), Some("Q4_K_M (Recommended)"));
+    assert_eq!(variants[0]["size_bytes"].as_u64(), Some(2023751680));
+    assert_eq!(variants[1]["filename"].as_str(), Some("model-Q8_0.gguf"));
+    assert_eq!(variants[1]["quant"].as_str(), Some("Q8_0"));
+}
+
+#[tokio::test]
+async fn test_hub_model_download_lifecycle() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. Initial download-status is idle
+    let resp = client
+        .get(format!("{base_url}/api/hub/download-status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["state"].as_str(), Some("idle"));
+    assert_eq!(body["percent"].as_f64(), Some(0.0));
+    assert_eq!(body["downloaded_bytes"].as_u64(), Some(0));
+    assert_eq!(body["total_bytes"].as_u64(), Some(0));
+
+    // 2. Start download
+    let start_payload = serde_json::json!({
+        "repo_id": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+        "gguf_variant": "Q4_K_M"
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/download"))
+        .json(&start_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let start_res: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(start_res["state"].as_str(), Some("running"));
+    assert_eq!(start_res["accepted"].as_bool(), Some(true));
+    assert_eq!(start_res["job_key"].as_str(), Some("job-default"));
+    assert_eq!(start_res["generation"].as_u64(), Some(1));
+
+    // 3. Check progress
+    let resp = client
+        .get(format!("{base_url}/api/hub/download-progress"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let prog: serde_json::Value = resp.json().await.unwrap();
+    assert!(prog["expected_bytes"].as_u64().unwrap() > 0);
+
+    // 4. Cancel download
+    let cancel_payload = serde_json::json!({
+        "job_key": "job-default"
+    });
+    let resp = client
+        .post(format!("{base_url}/api/hub/download/cancel"))
+        .json(&cancel_payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let cancel_res: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(cancel_res["job_key"].as_str(), Some("job-default"));
+    assert_eq!(cancel_res["state"].as_str(), Some("cancelled"));
+}
+
+#[tokio::test]
+async fn test_hub_datasets_and_models_folders() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Datasets
+    let resp = client.get(format!("{base_url}/api/hub/datasets/cached")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["cached"].as_array().map(|a| a.len()), Some(0));
+
+    let resp = client.get(format!("{base_url}/api/hub/datasets/local")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["datasets"].as_array().map(|a| a.len()), Some(0));
+
+    let resp = client.get(format!("{base_url}/api/hub/datasets/active-downloads")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["downloads"].as_array().map(|a| a.len()), Some(0));
+
+    // Models scan & folders
+    let resp = client.get(format!("{base_url}/api/models/scan-folders")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(0));
+
+    let resp = client.get(format!("{base_url}/api/models/recommended-folders")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["folders"][0].as_str(), Some("models"));
+
+    let resp = client.get(format!("{base_url}/api/models/loras")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["loras"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn test_chat_threads_projects_and_settings() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Threads
+    let resp = client.get(format!("{base_url}/api/chat/threads")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["threads"].as_array().map(|a| a.len()), Some(0));
+
+    let resp = client
+        .post(format!("{base_url}/api/chat/threads"))
+        .json(&serde_json::json!({"title": "Test Chat"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["id"].as_str(), Some("thread-1"));
+
+    // Projects
+    let resp = client.get(format!("{base_url}/api/chat/projects")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["projects"].as_array().map(|a| a.len()), Some(0));
+
+    // Chat Settings
+    let resp = client.get(format!("{base_url}/api/chat/settings")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["temperature"].as_f64(), Some(0.7));
+    assert_eq!(body["top_p"].as_f64(), Some(0.9));
+    assert_eq!(body["max_tokens"].as_u64(), Some(2048));
+}
+
+#[tokio::test]
+async fn test_settings_and_studio_export_endpoints() {
+    let (base_url, _) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Personalization
+    let resp = client.get(format!("{base_url}/api/settings/personalization")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["user_name"].as_str(), Some("rivergod"));
+    assert_eq!(body["custom_instructions"].as_str(), Some(""));
+
+    // Upload limit
+    let resp = client.get(format!("{base_url}/api/settings/upload-limit")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["limit_bytes"].as_u64(), Some(10737418240));
+
+    // VRAM budget
+    let resp = client.get(format!("{base_url}/api/settings/vram-budget")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["vram_budget_mb"].as_u64(), Some(4096));
+
+    // Download transport
+    let resp = client.get(format!("{base_url}/api/settings/download-transport")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["transport"].as_str(), Some("direct"));
+
+    // Embedding model
+    let resp = client.get(format!("{base_url}/api/settings/embedding-model")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["model"].is_null());
+
+    // OpenAI auto switch
+    let resp = client.get(format!("{base_url}/api/settings/openai-auto-switch")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["enabled"].as_bool(), Some(false));
+
+    // Chat preferences migrate
+    let resp = client.post(format!("{base_url}/api/settings/chat-preferences/migrate")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"].as_str(), Some("ok"));
+
+    // Studio capabilities
+    let resp = client.get(format!("{base_url}/api/studio/download-transport-capabilities")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["direct"].as_bool(), Some(true));
+    assert_eq!(body["hf_transfer"].as_bool(), Some(true));
+
+    // Export status
+    let resp = client.get(format!("{base_url}/api/export/status")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["active"].as_bool(), Some(false));
+    assert_eq!(body["status"].as_str(), Some("idle"));
+
+    // Llama update status
+    let resp = client.get(format!("{base_url}/api/llama/update-status")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["update_available"].as_bool(), Some(false));
+    assert_eq!(body["current_version"].as_str(), Some("0.1.0"));
+
+    // Llama cpp path
+    let resp = client.get(format!("{base_url}/api/settings/llama-cpp-path")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["path"].is_null());
+    assert_eq!(body["source"].as_str(), Some("default"));
+    assert_eq!(body["editable"].as_bool(), Some(false));
+    assert_eq!(body["available"].as_bool(), Some(true));
+    assert_eq!(body["resolved_binary"].as_str(), Some("native/sloth-vulkan"));
+    assert!(body["environment_variable"].is_null());
+    assert_eq!(body["reload_required"].as_bool(), Some(false));
+
+    // Llama backend
+    let resp = client.get(format!("{base_url}/api/llama/backend")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["supported"].as_bool(), Some(false));
+    assert_eq!(body["backend"].as_str(), Some("vulkan"));
+    assert_eq!(body["options"][0]["backend"].as_str(), Some("vulkan"));
+    assert_eq!(body["job"]["state"].as_str(), Some("idle"));
+
+    // System GPU fields verification
+    let resp = client.get(format!("{base_url}/api/system")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let gpu_dev = &body["gpu"]["devices"][0];
+    assert!(gpu_dev["name"].as_str().unwrap().contains("AMD Radeon RX 570"));
+    assert!(gpu_dev["gpu_name"].as_str().unwrap().contains("AMD Radeon RX 570"));
+    assert_eq!(gpu_dev["memory_total_gb"].as_f64(), Some(4.0));
+    assert_eq!(gpu_dev["vram_total_gb"].as_f64(), Some(4.0));
+    assert_eq!(gpu_dev["backend"].as_str(), Some("vulkan"));
+
+    let inf_gpu_dev = &body["inference_gpu"]["devices"][0];
+    assert!(inf_gpu_dev["name"].as_str().unwrap().contains("AMD Radeon RX 570"));
+    assert!(inf_gpu_dev["gpu_name"].as_str().unwrap().contains("AMD Radeon RX 570"));
+    assert_eq!(inf_gpu_dev["memory_total_gb"].as_f64(), Some(4.0));
+
+    // RAG knowledge bases
+    let resp = client.get(format!("{base_url}/api/rag/knowledge-bases")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["knowledge_bases"].as_array().map(|a| a.len()), Some(0));
+}

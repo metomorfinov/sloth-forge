@@ -16,8 +16,6 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { usePlatformStore } from "@/config/env";
-import { HfTokenIndicator } from "@/features/hub";
-import { useSettingsDialogStore } from "@/features/settings";
 import { TrainModelSelector } from "@/features/train-model-picker";
 import {
   TRAINING_METHOD_META,
@@ -30,12 +28,14 @@ import { cn } from "@/lib/utils";
 import type { TrainingMethod } from "@/types/training";
 import {
   AiBrain01Icon,
+  AiChipIcon,
   Database02Icon,
   FloppyDiskIcon,
   Settings05Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import type { CSSProperties, ReactNode } from "react";
+import { ClusterSection } from "../sections/cluster-section";
 import { DatasetPanel } from "../sections/dataset-section";
 import { DatasetSourceToggleAction } from "../sections/dataset-source-toggle";
 import { FieldHint } from "../sections/field-hint";
@@ -243,7 +243,6 @@ function TrainingMethodSelect() {
 
 function ModelPanel() {
   const t = useT();
-  const openSettings = useSettingsDialogStore((s) => s.openDialog);
   return (
     <div className="grid grid-cols-1 gap-4 @md/train-section:grid-cols-2 @2xl/train-section:grid-cols-[minmax(0,1fr)_180px_200px]">
       <div className="@md/train-section:col-span-2 @2xl/train-section:col-span-1">
@@ -261,13 +260,18 @@ function ModelPanel() {
         <TrainingMethodSelect />
       </SetupField>
       <SetupField
-        label={t("picker.hfToken.label")}
-        hint={t("studio.wizard.hfTokenDescription")}
+        label="Compute Backend"
+        hint="Active GPU acceleration backend powering training"
       >
-        <HfTokenIndicator
-          showLabel={true}
-          onOpenSettings={() => openSettings("general")}
-        />
+        <div className="flex h-9 items-center justify-between rounded-md border border-border/60 bg-secondary/40 px-3 text-ui-12">
+          <span className="flex items-center gap-1.5 font-medium text-foreground">
+            <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
+            Vulkan Native
+          </span>
+          <span className="font-mono text-ui-11 text-muted-foreground">
+            RX 570 4GB
+          </span>
+        </div>
       </SetupField>
     </div>
   );
@@ -314,6 +318,16 @@ export function TrainingWizard({
         }
       >
         <ParamsSection mode={paramMode} />
+      </SectionBox>
+
+      <SectionBox
+        title="Distributed Cluster (2-PC LAN / Dual-GPU)"
+        description="Scale training throughput across two PCs over local network API without SLI"
+        icon={AiChipIcon}
+        chipTint="var(--chart-2)"
+        dataTour="studio-cluster"
+      >
+        <ClusterSection />
       </SectionBox>
 
       <SectionBox

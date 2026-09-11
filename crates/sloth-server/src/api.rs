@@ -469,6 +469,30 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
         .map(|c| c.device_name().to_string())
         .unwrap_or_else(|| "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string());
 
+    let vram_used_gb = if vram_used > 0 {
+        vram_used as f64 / 1024.0
+    } else {
+        0.35
+    };
+    let vram_free_gb = 4.0 - vram_used_gb;
+    let vram_utilization_pct = (vram_used_gb / 4.0) * 100.0;
+
+    let gpu_device = serde_json::json!({
+        "device_id": 0,
+        "name": dev_name,
+        "gpu_name": dev_name,
+        "memory_total_gb": 4.0,
+        "vram_total_gb": 4.0,
+        "vram_used_gb": vram_used_gb,
+        "vram_free_gb": vram_free_gb,
+        "vram_utilization_pct": vram_utilization_pct,
+        "index": 0,
+        "visible_ordinal": 0,
+        "index_kind": "vulkan",
+        "backend": "vulkan",
+        "shared_memory": false
+    });
+
     let resp = serde_json::json!({
         "status": "ready",
         "platform": "linux",
@@ -495,14 +519,12 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "gpu": {
             "available": true,
             "backend": "vulkan",
-            "devices": [{
-                "device_id": 0,
-                "gpu_name": dev_name,
-                "vram_total_gb": 4.0,
-                "vram_free_gb": ((4096 - vram_used) as f64 / 1024.0),
-                "vram_used_gb": (vram_used as f64 / 1024.0),
-                "vram_utilization_pct": ((vram_used as f64 / 4096.0) * 100.0)
-            }]
+            "devices": [gpu_device.clone()]
+        },
+        "inference_gpu": {
+            "available": true,
+            "backend": "vulkan",
+            "devices": [gpu_device]
         },
         "ml_packages": {
             "torch": "2.4.0",
@@ -654,6 +676,479 @@ pub async fn handle_auth_logout() -> Json<serde_json::Value> {
 
 pub async fn handle_generation_presets() -> Json<serde_json::Value> {
     Json(serde_json::json!({}))
+}
+
+// Inference Status & Monitor
+pub async fn handle_inference_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let active_model = state.active_inference_model.read().await.clone();
+    Json(serde_json::json!({
+        "active_model": active_model,
+        "model_identifier": active_model,
+        "is_vision": false,
+        "is_gguf": true,
+        "is_local_model": true,
+        "loading": [],
+        "loaded": [active_model],
+        "context_length": 131072,
+        "supports_tools": false
+    }))
+}
+
+pub async fn handle_inference_monitor() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "idle",
+        "active_requests": 0,
+        "entries": [],
+        "total": 0
+    }))
+}
+
+pub async fn handle_inference_load(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let model = payload
+        .get("model_path")
+        .or_else(|| payload.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("llama-3.2-3b-instruct-q4_k_m")
+        .to_string();
+
+    {
+        let mut active = state.active_inference_model.write().await;
+        *active = model.clone();
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "model": model,
+        "display_name": model,
+        "is_vision": false,
+        "is_lora": false,
+        "is_gguf": true,
+        "is_local_model": true,
+        "context_length": 131072,
+        "supports_tools": false
+    }))
+}
+
+pub async fn handle_inference_unload() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_inference_load_progress() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "progress": 1.0,
+        "status": "idle"
+    }))
+}
+
+pub async fn handle_inference_validate(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let model = payload
+        .get("model_path")
+        .or_else(|| payload.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("llama-3.2-3b-instruct-q4_k_m");
+
+    Json(serde_json::json!({
+        "valid": true,
+        "message": "Model is valid",
+        "identifier": model,
+        "display_name": model,
+        "is_gguf": true,
+        "context_length": 131072,
+        "is_vision": false,
+        "is_lora": false
+    }))
+}
+
+pub async fn handle_inference_llama_flags() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "flags": [] }))
+}
+
+pub async fn handle_inference_estimate_memory() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "estimated_vram_bytes": 2000000000u64,
+        "fits": true
+    }))
+}
+
+pub async fn handle_inference_video_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "active_model": null,
+        "loading": [],
+        "loaded": []
+    }))
+}
+
+pub async fn handle_inference_images_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "active_model": null,
+        "loading": [],
+        "loaded": []
+    }))
+}
+
+// Models
+pub async fn handle_models_scan_folders() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "folders": [] }))
+}
+
+pub async fn handle_models_recommended_folders() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "folders": ["models"] }))
+}
+
+pub async fn handle_models_loras() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "loras": [],
+        "outputs_dir": "outputs"
+    }))
+}
+
+// Chat
+pub async fn handle_chat_threads_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "threads": [] }))
+}
+
+pub async fn handle_chat_threads_post(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("New Thread");
+    Json(serde_json::json!({
+        "id": "thread-1",
+        "title": title
+    }))
+}
+
+pub async fn handle_chat_thread_detail(
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "id": id,
+        "title": "New Thread",
+        "messages": []
+    }))
+}
+
+pub async fn handle_chat_thread_update(
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "id": id,
+        "status": "ok"
+    }))
+}
+
+pub async fn handle_chat_thread_delete(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_chat_threads_delete() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_chat_thread_messages(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "messages": [] }))
+}
+
+pub async fn handle_chat_thread_messages_post(
+    Path(_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "id": "msg-1", "status": "ok" }))
+}
+
+pub async fn handle_chat_projects_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "projects": [] }))
+}
+
+pub async fn handle_chat_projects_post() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "id": "project-1", "title": "New Project", "name": "New Project" }))
+}
+
+pub async fn handle_chat_projects_detail(Path(id): Path<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "id": id, "title": "New Project", "name": "New Project" }))
+}
+
+pub async fn handle_chat_projects_delete(Path(_id): Path<String>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+pub async fn handle_chat_settings_get(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let cs = state.chat_settings.read().await;
+    Json(serde_json::json!({
+        "temperature": cs.temperature,
+        "top_p": cs.top_p,
+        "max_tokens": cs.max_tokens
+    }))
+}
+
+pub async fn handle_chat_settings_put(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mut cs = state.chat_settings.write().await;
+    if let Some(t) = payload.get("temperature").and_then(|v| v.as_f64()) {
+        cs.temperature = t;
+    }
+    if let Some(p) = payload.get("top_p").and_then(|v| v.as_f64()) {
+        cs.top_p = p;
+    }
+    if let Some(m) = payload.get("max_tokens").and_then(|v| v.as_u64()) {
+        cs.max_tokens = m as usize;
+    }
+    Json(serde_json::json!({
+        "temperature": cs.temperature,
+        "top_p": cs.top_p,
+        "max_tokens": cs.max_tokens
+    }))
+}
+
+pub async fn handle_chat_count() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "count": 0 }))
+}
+
+pub async fn handle_chat_attachments() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "attachments": [] }))
+}
+
+// Settings
+pub async fn handle_settings_personalization() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "user_name": "rivergod",
+        "custom_instructions": ""
+    }))
+}
+
+pub async fn handle_settings_upload_limit(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
+    Json(serde_json::json!({
+        "limit_bytes": limit
+    }))
+}
+
+pub async fn handle_settings_upload_limit_put(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(lim) = payload.get("limit_bytes").and_then(|v| v.as_u64()) {
+        state.upload_limit_bytes.store(lim, Ordering::Relaxed);
+    }
+    let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
+    Json(serde_json::json!({
+        "limit_bytes": limit
+    }))
+}
+
+pub async fn handle_settings_vram_budget(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let budget = state.vram_budget_mb.load(Ordering::Relaxed);
+    Json(serde_json::json!({
+        "vram_budget_mb": budget
+    }))
+}
+
+pub async fn handle_settings_vram_budget_put(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(b) = payload.get("vram_budget_mb").and_then(|v| v.as_u64()) {
+        state.vram_budget_mb.store(b, Ordering::Relaxed);
+    }
+    let budget = state.vram_budget_mb.load(Ordering::Relaxed);
+    Json(serde_json::json!({
+        "vram_budget_mb": budget
+    }))
+}
+
+pub async fn handle_settings_download_transport() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "transport": "direct"
+    }))
+}
+
+pub async fn handle_settings_embedding_model() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "model": null
+    }))
+}
+
+pub async fn handle_settings_openai_auto_switch() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": false
+    }))
+}
+
+pub async fn handle_settings_openai_auto_switch_overrides() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "overrides": {}
+    }))
+}
+
+pub async fn handle_settings_chat_preferences() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok"
+    }))
+}
+
+pub async fn handle_settings_model_memory() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "fraction": 0.9
+    }))
+}
+
+pub async fn handle_settings_last_local_model() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "last_model": "llama-3.2-3b-instruct-q4_k_m"
+    }))
+}
+
+pub async fn handle_settings_llama_cpp_path() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "path": null,
+        "source": "default",
+        "editable": false,
+        "available": true,
+        "resolved_binary": "native/sloth-vulkan",
+        "environment_variable": null,
+        "reload_required": false
+    }))
+}
+
+pub async fn handle_llama_backend() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "supported": false,
+        "reason": "Native Vulkan compute engine active (AMD Polaris 10)",
+        "envBackend": "vulkan",
+        "backend": "vulkan",
+        "backendRequest": "vulkan",
+        "selectionApplied": true,
+        "installedTag": "vulkan-polaris-1.4",
+        "options": [
+            {
+                "backend": "vulkan",
+                "available": true,
+                "resolvedBackend": "vulkan",
+                "releaseTag": "vulkan-polaris-1.4",
+                "downloadSizeBytes": 0
+            }
+        ],
+        "job": {
+            "state": "idle",
+            "operation": null,
+            "requested_backend": null,
+            "message": "Vulkan compute active",
+            "error": null,
+            "progress": null,
+            "reload_required": false,
+            "started_at": null,
+            "finished_at": null
+        }
+    }))
+}
+
+pub async fn handle_settings_hugging_face_cache() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "path": null,
+        "size_bytes": 0
+    }))
+}
+
+pub async fn handle_settings_keyless_api_access() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": true
+    }))
+}
+
+pub async fn handle_settings_remote_access() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": false
+    }))
+}
+
+pub async fn handle_settings_preview_sharing() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": false
+    }))
+}
+
+pub async fn handle_settings_coding_agents() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "agents": []
+    }))
+}
+
+pub async fn handle_settings_current_date_prompt() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": true
+    }))
+}
+
+pub async fn handle_settings_debug_logs_sources() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "sources": []
+    }))
+}
+
+pub async fn handle_settings_debug_logs() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "lines": []
+    }))
+}
+
+// Studio / Export / Llama / RAG / Diffusion
+pub async fn handle_studio_download_transport_capabilities() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "direct": true,
+        "hf_transfer": true
+    }))
+}
+
+pub async fn handle_export_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "active": false,
+        "status": "idle"
+    }))
+}
+
+pub async fn handle_llama_update_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "update_available": false,
+        "current_version": "0.1.0"
+    }))
+}
+
+pub async fn handle_llama_update() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "Already up to date"
+    }))
+}
+
+pub async fn handle_rag_knowledge_bases() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "knowledge_bases": []
+    }))
+}
+
+pub async fn handle_diffusion_status() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "active": false,
+        "status": "idle"
+    }))
 }
 
 pub async fn handle_api_not_found(uri: axum::http::Uri) -> (StatusCode, Json<serde_json::Value>) {

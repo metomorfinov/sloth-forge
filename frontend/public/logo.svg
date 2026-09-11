@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradients -->
+    <radialGradient id="bg" cx="50%" cy="44%" r="65%">
+      <stop offset="0%" stop-color="#281C15" />
+      <stop offset="65%" stop-color="#140E0A" />
+      <stop offset="100%" stop-color="#080504" />
+    </radialGradient>
+    
+    <!-- Amber Ring Gradient (#FF7A00 theme) -->
+    <linearGradient id="amberRing" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB74D" />
+      <stop offset="30%" stop-color="#FF7A00" />
+      <stop offset="70%" stop-color="#E65100" />
+      <stop offset="100%" stop-color="#8A2500" />
+    </linearGradient>
+
+    <!-- Forge Heat Glow -->
+    <radialGradient id="coreGlow" cx="50%" cy="42%" r="48%">
+      <stop offset="0%" stop-color="#FF7A00" stop-opacity="0.55" />
+      <stop offset="50%" stop-color="#FF5100" stop-opacity="0.2" />
+      <stop offset="100%" stop-color="#FF7A00" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Flame Layers (#FF7A00 Primary) -->
+    <linearGradient id="flameOuter" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#D84315" />
+      <stop offset="35%" stop-color="#FF7A00" />
+      <stop offset="80%" stop-color="#FFA726" />
+      <stop offset="100%" stop-color="#FFE082" />
+    </linearGradient>
+
+    <linearGradient id="flameInner" x1="0%" y1="100%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#FF7A00" />
+      <stop offset="45%" stop-color="#FFA000" />
+      <stop offset="90%" stop-color="#FFD54F" />
+      <stop offset="100%" stop-color="#FFFDE7" />
+    </linearGradient>
+
+    <!-- Metallic Steel Anvil Gradients -->
+    <linearGradient id="anvilBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4E4640" />
+      <stop offset="35%" stop-color="#36302B" />
+      <stop offset="75%" stop-color="#221D1A" />
+      <stop offset="100%" stop-color="#161311" />
+    </linearGradient>
+
+    <linearGradient id="anvilDeckGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF7A00" stop-opacity="0" />
+      <stop offset="20%" stop-color="#FF9E2C" />
+      <stop offset="50%" stop-color="#FFF9C4" />
+      <stop offset="80%" stop-color="#FF9E2C" />
+      <stop offset="100%" stop-color="#FF7A00" stop-opacity="0" />
+    </linearGradient>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="7" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Base Circle & Ring -->
+  <circle cx="256" cy="256" r="247" fill="url(#bg)" />
+  <circle cx="256" cy="256" r="240" fill="none" stroke="url(#amberRing)" stroke-width="7" />
+  <circle cx="256" cy="256" r="233" fill="none" stroke="#FF7A00" stroke-width="1.5" stroke-opacity="0.4" />
+
+  <!-- Ambient Forge Glow -->
+  <circle cx="256" cy="226" r="185" fill="url(#coreGlow)" />
+
+  <!-- ================= FLAME MANE (SLOTH FORGE FIRE) ================= -->
+  <!-- Outer Blazing Flame (Amber #FF7A00 to gold) -->
+  <path d="M256 46
+           C286 92 334 112 358 158
+           C376 195 372 230 358 262
+           C384 238 402 202 396 164
+           C412 198 422 242 406 288
+           C390 328 352 354 306 364
+           C320 345 328 322 322 298
+           C290 324 240 330 200 314
+           C192 334 198 350 206 364
+           C160 354 122 328 106 288
+           C90 242 100 198 116 164
+           C110 202 128 238 154 262
+           C140 230 136 195 154 158
+           C178 112 226 92 256 46 Z"
+        fill="url(#flameOuter)" filter="url(#glow)" />
+
+  <!-- Inner Amber Flame Locks -->
+  <path d="M256 78
+           C280 118 318 136 336 174
+           C350 204 346 232 334 258
+           C352 238 364 210 358 182
+           C372 208 378 244 364 280
+           C350 312 318 334 284 344
+           C238 350 194 338 162 304
+           C148 270 154 234 166 208
+           C160 234 172 256 188 270
+           C178 244 176 214 188 184
+           C204 146 236 120 256 78 Z"
+        fill="url(#flameInner)" />
+
+  <!-- ================= THE SLOTH FACE ================= -->
+  <!-- Cute Inner Sloth Face (Warm Porcelain) -->
+  <path d="M256 138
+           C206 138 174 178 174 228
+           C174 278 208 310 256 310
+           C304 310 338 278 338 228
+           C338 178 306 138 256 138 Z"
+        fill="#FFF9EF" />
+
+  <!-- Classic Sloth Eye Mask (Dark Chocolate / Forge Umber) -->
+  <path d="M202 180
+           C182 200 176 232 186 254
+           C194 272 214 270 224 252
+           C232 236 228 204 218 186
+           C212 180 206 176 202 180 Z"
+        fill="#352016" />
+
+  <path d="M310 180
+           C330 200 336 232 326 254
+           C318 272 298 270 288 252
+           C280 236 284 204 294 186
+           C300 180 306 176 310 180 Z"
+        fill="#352016" />
+
+  <!-- Big Sloth Eyes with Amber Forge Highlights -->
+  <!-- Left Eye -->
+  <circle cx="206" cy="228" r="15.5" fill="#180F0A" />
+  <ellipse cx="206" cy="234" rx="11.5" ry="6.5" fill="#FF7A00" />
+  <circle cx="211" cy="223" r="5" fill="#FFFFFF" />
+  <circle cx="201" cy="232" r="2" fill="#FFFFFF" opacity="0.85" />
+
+  <!-- Right Eye -->
+  <circle cx="306" cy="228" r="15.5" fill="#180F0A" />
+  <ellipse cx="306" cy="234" rx="11.5" ry="6.5" fill="#FF7A00" />
+  <circle cx="311" cy="223" r="5" fill="#FFFFFF" />
+  <circle cx="301" cy="232" r="2" fill="#FFFFFF" opacity="0.85" />
+
+  <!-- Cute Sloth Nose -->
+  <ellipse cx="256" cy="248" rx="9" ry="7" fill="#22140D" />
+  <ellipse cx="254.5" cy="246" rx="3.5" ry="2" fill="#4E342E" />
+
+  <!-- Sweet Smiling Mouth (:3) -->
+  <path d="M242 258
+           C245 267 253 267 256 261
+           C259 267 267 267 270 258"
+        stroke="#22140D" stroke-width="4.5" stroke-linecap="round" fill="none" />
+
+  <!-- Little Flame Forehead Tuft -->
+  <path d="M256 124
+           C265 142 272 154 267 166
+           C260 158 254 158 249 164
+           C247 152 249 140 256 124 Z"
+        fill="#FF9E00" />
+
+  <!-- ================= THE FORGE ANVIL ================= -->
+  <!-- Shadow Under Anvil -->
+  <ellipse cx="256" cy="446" rx="150" ry="17" fill="#000000" opacity="0.75" />
+
+  <!-- Heavy Duty Anvil Body -->
+  <path d="M 98 348
+           C 138 348 170 346 186 342
+           L 186 336
+           L 368 336
+           L 368 348
+           L 404 348
+           L 404 366
+           C 376 370 354 376 338 388
+           C 320 400 314 416 332 440
+           L 366 448
+           L 146 448
+           L 180 440
+           C 198 416 192 400 174 388
+           C 158 376 126 370 98 348 Z"
+        fill="url(#anvilBody)"
+        stroke="#120E0C"
+        stroke-width="3" />
+
+  <!-- Molten Top Deck Heat Sheen -->
+  <path d="M 186 336 L 368 336 L 368 342 L 186 342 Z" fill="url(#anvilDeckGlow)" />
+  <line x1="184" y1="339" x2="370" y2="339" stroke="#FF7A00" stroke-width="3.5" stroke-linecap="round" filter="url(#glow)" />
+
+  <!-- Metallic Chamfers & Relief -->
+  <!-- Horn Upper Chamfer -->
+  <path d="M 98 348 C 130 348 165 345 186 339 L 186 343 C 158 349 128 351 98 348 Z" fill="#7D6F67" opacity="0.6" />
+  
+  <!-- Anvil Center Inset / Waist -->
+  <path d="M 196 392 C 220 400 292 400 316 392 C 300 412 296 430 314 442 L 198 442 C 216 430 212 412 196 392 Z" fill="#1B1614" opacity="0.7" />
+  
+  <!-- Anvil Feet Line -->
+  <line x1="160" y1="442" x2="352" y2="442" stroke="#FF7A00" stroke-width="1.5" stroke-opacity="0.5" />
+
+  <!-- Floating Embers & Sparks -->
+  <circle cx="256" cy="30" r="4.5" fill="#FFFDE7" filter="url(#glow)" />
+  <circle cx="368" cy="102" r="3.5" fill="#FFB300" filter="url(#glow)" />
+  <circle cx="140" cy="120" r="3.5" fill="#FF7A00" filter="url(#glow)" />
+  <circle cx="396" cy="170" r="2.5" fill="#FFA726" />
+  <circle cx="116" cy="180" r="2.5" fill="#FF7A00" />
+  <circle cx="285" cy="58" r="2" fill="#FFE082" />
+  <circle cx="226" cy="68" r="2.5" fill="#FF7A00" />
+</svg>

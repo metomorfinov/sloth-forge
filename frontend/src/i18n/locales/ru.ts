@@ -62,8 +62,8 @@ export const ru = {
       truncated: "Эта страница слишком длинная, чтобы выполнить поиск целиком.",
     },
     beta: "BETA",
-    brand: "unsloth",
-    product: "Unsloth",
+    brand: "SlothForge",
+    product: "SlothForge",
     accountMenu: "Меню аккаунта {name}",
     updateAvailable: "Доступно обновление",
     resize: {
@@ -72,7 +72,7 @@ export const ru = {
       drag: "Потяните, чтобы изменить размер",
     },
     aria: {
-      home: "Главная Unsloth",
+      home: "Главная SlothForge",
       closeSidebar: "Закрыть боковую панель",
       openSidebar: "Открыть боковую панель",
       resizeSidebar: "Изменить размер или свернуть боковую панель",
@@ -187,7 +187,7 @@ export const ru = {
     title: "Настройки",
     dialog: {
       title: "Настройки",
-      description: "Управление настройками Unsloth.",
+      description: "Управление настройками SlothForge.",
       closeAriaLabel: "Закрыть настройки",
       searchPlaceholder: "Поиск по настройкам…",
       searchNoResults: "Настройки не найдены.",
@@ -253,7 +253,7 @@ export const ru = {
         },
         logOut: {
           label: "Выйти",
-          description: "Выйти из Unsloth",
+          description: "Выйти из SlothForge",
         },
         approveToolRequest: {
           label: "Одобрить запрос",
@@ -548,7 +548,7 @@ export const ru = {
           "Разрешите доступ к микрофону, чтобы видеть названия устройств",
         allowMicrophone: "Разрешить доступ к микрофону",
         micAccessBlocked:
-          "Доступ к микрофону заблокирован. Разрешите доступ к микрофону для этой страницы Unsloth и повторите попытку.",
+          "Доступ к микрофону заблокирован. Разрешите доступ к микрофону для этой страницы SlothForge и повторите попытку.",
         micAccessBlockedDesktop:
           "Доступ к микрофону заблокирован. Повторите попытку и выберите «Разрешить» или включите микрофон в системных настройках конфиденциальности.",
         micAccessUnsupported:
@@ -654,7 +654,7 @@ export const ru = {
     },
     general: {
       title: "Общие",
-      description: "Глобальные настройки Unsloth.",
+      description: "Глобальные настройки SlothForge.",
       account: "Аккаунт",
       huggingFaceToken: "Токен Hugging Face",
       huggingFaceTokenDescription:
@@ -665,7 +665,7 @@ export const ru = {
       checkingToken: "Проверка токена...",
       tokenValidated: "Токен проверен",
       password: "Пароль",
-      passwordDescription: "Изменить пароль для этого аккаунта Unsloth.",
+      passwordDescription: "Изменить пароль для этого аккаунта SlothForge.",
       passwordDialog: {
         trigger: "Изменить пароль",
         title: "Изменить пароль",
@@ -674,7 +674,7 @@ export const ru = {
         setTrigger: "Задать удалённый пароль",
         setTitle: "Задать удалённый пароль",
         setDescription:
-          "Выберите пароль, с которым удалённые браузеры входят как unsloth (не менее {minLength} символов). Настольное приложение Unsloth продолжит входить автоматически.",
+          "Выберите пароль, с которым удалённые браузеры входят как unsloth (не менее {minLength} символов). Настольное приложение SlothForge продолжит входить автоматически.",
         setSubmit: "Задать пароль",
         setting: "Установка...",
         setDone: "Пароль задан.",
@@ -739,7 +739,7 @@ export const ru = {
           "Сохраняет KV-кеш перед автовыгрузкой при простое, чтобы возобновлённые чаты не перечитывали историю. До 10 ГБ на диске.",
         apiOnly: "Выгружать только модели, загруженные через API",
         apiOnlyDescription:
-          "Автовыгрузка при простое оставляет в памяти модель, которую вы загрузили в Unsloth, и освобождает только те, что загрузил запрос через API.",
+          "Автовыгрузка при простое оставляет в памяти модель, которую вы загрузили в SlothForge, и освобождает только те, что загрузил запрос через API.",
       },
       previewSharing: {
         sectionTitle: "Публикация предпросмотра",
@@ -771,13 +771,13 @@ export const ru = {
       },
       startup: {
         sectionTitle: "Автозапуск",
-        launchAtLogin: "Запускать Unsloth при входе в систему",
+        launchAtLogin: "Запускать SlothForge при входе в систему",
         launchAtLoginDescription:
-          "Запускает Unsloth в фоновом режиме при входе в систему. Приложение остаётся в строке меню или системном трее, пока вы его не откроете.",
+          "Запускает SlothForge в фоновом режиме при входе в систему. Приложение остаётся в строке меню или системном трее, пока вы его не откроете.",
 
         closeToTray: "Закрывать в системный трей",
         closeToTrayDescription:
-          "Оставлять Unsloth и его сервер работающими в фоне при закрытии главного окна.",
+          "Оставлять SlothForge и его сервер работающими в фоне при закрытии главного окна.",
         closeToTraySaveError:
           "Не удалось обновить настройку закрытия в системный трей.",
         loadError: "Не удалось загрузить настройку автозапуска.",
@@ -871,22 +871,22 @@ export const ru = {
         action: "Сбросить настройки",
         confirmTitle: "Сбросить все локальные настройки?",
         confirmDescription:
-          "Очищает только локальные настройки и перезагружает Unsloth. Чаты, доступ по API и настройки в базе данных сохраняются.",
+          "Очищает только локальные настройки и перезагружает SlothForge. Чаты, доступ по API и настройки в базе данных сохраняются.",
         confirmAction: "Сбросить и перезагрузить",
       },
       permissions: {
         sectionTitle: "Разрешения",
         bypassLabel: "Разрешения инструментов",
         bypassDescription:
-          "Как Unsloth подтверждает вызовы инструментов в чате (терминал, python, веб, MCP) перед запуском. Режим «Full access» отключает подтверждения и песочницу для кода.",
+          "Как SlothForge подтверждает вызовы инструментов в чате (терминал, python, веб, MCP) перед запуском. Режим «Full access» отключает подтверждения и песочницу для кода.",
       },
     },
     profile: {
       title: "Профиль",
-      description: "Как ваш профиль отображается в Unsloth.",
+      description: "Как ваш профиль отображается в SlothForge.",
       changePicture: "Изменить фото профиля",
       displayName: "Отображаемое имя",
-      nickname: "Как Unsloth к вам обращаться?",
+      nickname: "Как SlothForge к вам обращаться?",
       nicknamePlaceholder: "Псевдоним",
       nicknameSaved: "Предпочитаемое имя сохранено",
       avatarShape: "Форма фото профиля",
@@ -913,10 +913,10 @@ export const ru = {
       stats: {
         title: "Ваша статистика",
         subtitle:
-          "Всё ниже считается по вашей собственной истории. Ничего не собирается и не отправляется в Unsloth.",
+          "Всё ниже считается по вашей собственной истории. Ничего не собирается и не отправляется в SlothForge.",
         retry: "Повторить",
         privacyNote:
-          "Статистика рассчитывается по локальной истории чатов, использования API и обучения в вашей установке Unsloth. Запросы, ответы и ключи API для статистики никогда не сохраняются. Ничего не отправляется ни в Unsloth, ни третьим лицам.",
+          "Статистика рассчитывается по локальной истории чатов, использования API и обучения в вашей установке SlothForge. Запросы, ответы и ключи API для статистики никогда не сохраняются. Ничего не отправляется ни в SlothForge, ни третьим лицам.",
         emptyChats:
           "Чатов и использования API пока нет. Начните разговор или выполните аутентифицированный запрос к локальному API.",
         lifetimeTokens: "Токенов за всё время",
@@ -945,7 +945,7 @@ export const ru = {
         tokensIn: "Отправлено токенов",
         tokensOut: "Сгенерировано токенов",
         totalTokens: "Всего токенов",
-        studioChatTokens: "Токены Unsloth Chat",
+        studioChatTokens: "Токены SlothForge Chat",
         apiTokens: "Токены API",
         cachedTokens: "Токенов из кеша",
         cachedValue: "{tokens} ({percent}% ввода)",
@@ -976,7 +976,7 @@ export const ru = {
     },
     appearance: {
       title: "Оформление",
-      description: "Как Unsloth выглядит на этом устройстве.",
+      description: "Как SlothForge выглядит на этом устройстве.",
       theme: {
         title: "Тема",
         label: "Цветовая схема",
@@ -987,7 +987,7 @@ export const ru = {
       },
       palette: {
         label: "Цветовая палитра",
-        description: "Цвета, используемые в Unsloth в светлой и тёмной теме.",
+        description: "Цвета, используемые в SlothForge в светлой и тёмной теме.",
         standard: "Стандартная",
         classic: "Классическая",
         minimal: "Минималистичная",
@@ -1045,7 +1045,7 @@ export const ru = {
         },
         uiFontSize: {
           label: "Размер шрифта интерфейса",
-          description: "Настройте базовый размер шрифта интерфейса Unsloth.",
+          description: "Настройте базовый размер шрифта интерфейса SlothForge.",
         },
         codeFontSize: {
           label: "Размер шрифта кода",
@@ -1075,7 +1075,7 @@ export const ru = {
       language: {
         title: "Язык",
         label: "Язык интерфейса",
-        description: "Язык, используемый Unsloth.",
+        description: "Язык, используемый SlothForge.",
         autoDetect: "Автоопределение",
       },
       layout: {
@@ -1102,7 +1102,7 @@ export const ru = {
     },
     resources: {
       title: "Система",
-      description: "Мониторинг оборудования и хранилища этого сервера Unsloth.",
+      description: "Мониторинг оборудования и хранилища этого сервера SlothForge.",
       liveUpdates: "Обновления в реальном времени",
       floatingWindow: "Плавающее окно",
       disableOverlay: "Отключить оверлей",
@@ -1167,7 +1167,7 @@ export const ru = {
           description: "Используйте собственную сборку llama-server.",
           hint: "Выберите папку llama.cpp с llama-server или сборку, где он находится в build/bin. Пользовательская среда используется для чата GGUF, эмбеддингов и поддерживаемых голосовых моделей. Переменные окружения по-прежнему имеют приоритет.",
           automatic: "Автоматически (в комплекте)",
-          bundled: "Используется среда llama.cpp, установленная Unsloth.",
+          bundled: "Используется среда llama.cpp, установленная SlothForge.",
           active: "Ваш llama-server будет использован при следующей загрузке модели.",
           environmentManaged: "Управляется переменной окружения {variable}.",
           missingBinary: "llama-server больше недоступен в этой папке. Выберите другую папку или используйте комплектную среду.",
@@ -1190,7 +1190,7 @@ export const ru = {
         },
         unsupported: {
           notInstalled: "Управляемая установка llama.cpp не найдена, поэтому менять нечего.",
-          localLink: "llama.cpp, это локальный каталог, который вы подключили сами, и Unsloth его не заменяет.",
+          localLink: "llama.cpp, это локальный каталог, который вы подключили сами, и SlothForge его не заменяет.",
           sourceBuild: "Этот llama.cpp собран из исходников, его бэкенд нельзя переключить отсюда.",
           customPath: "Выбрана пользовательская папка llama.cpp. Её сборка определяет вычислительный бэкенд.",
           unresolved: "Не удалось проверить доступные бэкенды. Проверьте подключение и повторите попытку.",
@@ -1260,7 +1260,7 @@ export const ru = {
       description:
         "Подключение кодинг-агентов, таких как Claude Code и Codex, к локальной модели с помощью unsloth start.",
       intro:
-        "подключает Claude Code, Codex, DeepSeek Harness, Hermes, OpenClaw, OpenCode и других агентов к модели, которую Unsloth обслуживает локально, полностью офлайн. Запускается OpenAI-совместимый сервер, а файлы конфигурации вашего агента остаются нетронутыми.",
+        "подключает Claude Code, Codex, DeepSeek Harness, Hermes, OpenClaw, OpenCode и других агентов к модели, которую SlothForge обслуживает локально, полностью офлайн. Запускается OpenAI-совместимый сервер, а файлы конфигурации вашего агента остаются нетронутыми.",
       readDocs: "Открыть документацию",
       copy: "Копировать",
       copied: "Скопировано",
@@ -1286,17 +1286,17 @@ export const ru = {
       // English is the baseline until translated: the three-part sentence is assembled around an
       // inline link and needs restructuring first.
       automaticSettingsNote:
-        "Unsloth automatically applies the model’s recommended settings if you have not set any flags.",
+        "SlothForge automatically applies the model’s recommended settings if you have not set any flags.",
       configurationNote:
         "You can also adjust any configuration. See further below or",
       configurationDocs: "docs",
       configurationFlagsSuffix: "for flags.",
       modelNote:
-        "Codex требует модель GGUF, обслуживаемую llama-server. Другие агенты могут работать и с моделями на основе transformers; уберите --model, чтобы использовать модель, уже загруженную в Unsloth.",
+        "Codex требует модель GGUF, обслуживаемую llama-server. Другие агенты могут работать и с моделями на основе transformers; уберите --model, чтобы использовать модель, уже загруженную в SlothForge.",
       subagent: {
         title: "Использовать локальную модель в качестве субагента",
         description:
-          "Оставьте {agent} на текущей модели и делегируйте отдельные задачи этой локальной модели Unsloth.",
+          "Оставьте {agent} на текущей модели и делегируйте отдельные задачи этой локальной модели SlothForge.",
         setupCommand: "Команда настройки",
         copySetupCommand: "Копировать команду настройки субагента",
         usagePrompt: "Затем в {agent} введите:",
@@ -1308,7 +1308,7 @@ export const ru = {
       quickstart: {
         title: "Собрать команду",
         description:
-          "Запустите агента на модели, уже загруженной в Unsloth. Сначала загрузите модель, затем замените claude на любого поддерживаемого агента из списка ниже.",
+          "Запустите агента на модели, уже загруженной в SlothForge. Сначала загрузите модель, затем замените claude на любого поддерживаемого агента из списка ниже.",
         noneDetected:
           "В PATH не найдено ни одного поддерживаемого агента с интерфейсом командной строки.",
         installed: "Установлен",
@@ -1328,9 +1328,9 @@ export const ru = {
       options: {
         title: "Основные параметры",
         description:
-          "Сначала разбираются флаги Unsloth; всё, что не распознано, передаётся агенту без изменений.",
+          "Сначала разбираются флаги SlothForge; всё, что не распознано, передаётся агенту без изменений.",
         model:
-          "Выбирает модель. Без --model команда unsloth start использует модель, уже загруженную в Unsloth, и завершается ошибкой, если модели нет.",
+          "Выбирает модель. Без --model команда unsloth start использует модель, уже загруженную в SlothForge, и завершается ошибкой, если модели нет.",
         contextLength:
           "Задаёт запрашиваемую длину контекста (псевдоним: --max-seq-length).",
         ggufVariant: "Выбирает вариант квантизации GGUF.",
@@ -1341,11 +1341,11 @@ export const ru = {
         serve: "Включает или выключает автоматический локальный сервер.",
         launch: "Запускает агента либо только выводит команду и окружение.",
         persist:
-          "Сохраняет между запусками хранилище агента, управляемое Unsloth.",
+          "Сохраняет между запусками хранилище агента, управляемое SlothForge.",
         asSubagent:
-          "Оставляет родительского агента на текущей модели и регистрирует Unsloth как локального субагента (Claude Code, Codex и OpenCode).",
+          "Оставляет родительского агента на текущей модели и регистрирует SlothForge как локального субагента (Claude Code, Codex и OpenCode).",
         apiKey:
-          "Передаёт ваш ключ API Unsloth (альтернатива: переменная UNSLOTH_API_KEY).",
+          "Передаёт ваш ключ API SlothForge (альтернатива: переменная UNSLOTH_API_KEY).",
         reasoning:
           "Использовать рассуждения в чате: on, off или auto. Auto следует чат-шаблону модели, что обычно означает on.",
         reasoningEffort:
@@ -1354,14 +1354,14 @@ export const ru = {
           "Пропускает запросы подтверждения. Используйте только в доверенных средах.",
       },
       remote: {
-        title: "Подключение к удалённому Unsloth Studio",
+        title: "Подключение к удалённому SlothForge Studio",
         description:
-          "Чтобы подключить unsloth start к удалённому экземпляру Unsloth Studio, задайте перед запуском следующие переменные (или передайте --api-key напрямую):",
+          "Чтобы подключить unsloth start к удалённому экземпляру SlothForge Studio, задайте перед запуском следующие переменные (или передайте --api-key напрямую):",
       },
       passthrough: {
         title: "Передача аргументов агенту",
         description:
-          "Аргументы после флагов Unsloth передаются самому агенту, поэтому его собственные команды вроде resume продолжают работать:",
+          "Аргументы после флагов SlothForge передаются самому агенту, поэтому его собственные команды вроде resume продолжают работать:",
       },
       dryRun: {
         title: "Предпросмотр без запуска",
@@ -1451,7 +1451,7 @@ export const ru = {
         title: "Веб-поиск",
         images: "Показывать изображения из веб-поиска",
         imagesDescription:
-          "Позволяет веб-поиску возвращать изображения и подбирает по одному для каждого пункта, который перечисляет ответ. Миниатюры загружает и уменьшает Unsloth, поэтому браузер никогда не обращается к хостам изображений.",
+          "Позволяет веб-поиску возвращать изображения и подбирает по одному для каждого пункта, который перечисляет ответ. Миниатюры загружает и уменьшает SlothForge, поэтому браузер никогда не обращается к хостам изображений.",
       },
       artifacts: {
         title: "Canvas",
@@ -1598,11 +1598,11 @@ export const ru = {
     remoteLan: {
       title: "Удалённый доступ и LAN",
       description:
-        "Откройте этот Unsloth с других устройств: через локальную сеть или временный публичный URL.",
+        "Откройте этот SlothForge с других устройств: через локальную сеть или временный публичный URL.",
     },
     apiKeys: {
       title: "API",
-      description: "Доступ к Unsloth через OpenAI-совместимый API.",
+      description: "Доступ к SlothForge через OpenAI-совместимый API.",
       readDocs: "Читать документацию API",
       noAccess: "Доступа к API пока нет.",
       accessTokens: "Токены доступа",
@@ -1630,7 +1630,7 @@ export const ru = {
       osWindows: "Windows",
       secureHttps: "Защищённый HTTPS",
       secureHttpsHint:
-        "Порт, привязанный к адресу 0.0.0.0, по-прежнему доступен глобально. Для полной безопасности запустите Unsloth с флагом --secure, чтобы оставить доступ только по этой HTTPS-ссылке.",
+        "Порт, привязанный к адресу 0.0.0.0, по-прежнему доступен глобально. Для полной безопасности запустите SlothForge с флагом --secure, чтобы оставить доступ только по этой HTTPS-ссылке.",
       copyTunnelUrl: "Копировать URL туннеля",
       copySnippet: "Копировать фрагмент",
       copy: "Копировать",
@@ -1664,7 +1664,7 @@ export const ru = {
       title: "О программе",
       description:
         "Документация, заметки о выпусках, обратная связь и сведения о сборке.",
-      studioVersion: "Версия Unsloth",
+      studioVersion: "Версия SlothForge",
       packageVersion: "Версия пакета",
       desktopAppVersion: "Версия настольного приложения",
       desktopAppVersionUnavailable: "Недоступно",
@@ -1683,7 +1683,7 @@ export const ru = {
       reportIssue: "Сообщить о проблеме",
       license: {
         sectionTitle: "Лицензия",
-        studioLabel: "Unsloth",
+        studioLabel: "SlothForge",
         studioLicense: "AGPL-3.0",
         studioDescription:
           "Исходный код открыт и распространяется по лицензии GNU AGPL v3.0.",
@@ -1692,24 +1692,24 @@ export const ru = {
         libraryDescription: "Распространяется по лицензии Apache 2.0.",
       },
       dangerZone: "Опасная зона",
-      shutDownStudio: "Выключить Unsloth",
+      shutDownStudio: "Выключить SlothForge",
       shutDownStudioDescription:
-        "Останавливает сервер Unsloth и завершает вашу сессию.",
+        "Останавливает сервер SlothForge и завершает вашу сессию.",
       shutDown: "Выключить",
       update: {
-        title: "Обновить Unsloth",
+        title: "Обновить SlothForge",
         commandText: "Текст «{label}»",
         copied: "Скопировано",
         copyCommand: "Копировать команду",
         commandCopied: "Скопировано: {label}",
         copyNamedCommand: "Копировать «{label}»",
-        checkingInstall: "Проверка способа установки Unsloth...",
-        installIntro: "Чтобы установить или обновить Unsloth:",
+        checkingInstall: "Проверка способа установки SlothForge...",
+        installIntro: "Чтобы установить или обновить SlothForge:",
         localUpdateHeading: "Локальное обновление",
         installCommandUnix: "Команда установки для macOS/Linux",
         installCommandWindows: "Команда установки для Windows",
         localInstallDetected:
-          "Обнаружена установка из локальной рабочей копии. Обновляйте Unsloth из исходной рабочей копии, чтобы не заменить эту установку пакетом из PyPI.",
+          "Обнаружена установка из локальной рабочей копии. Обновляйте SlothForge из исходной рабочей копии, чтобы не заменить эту установку пакетом из PyPI.",
         pullThenUpdate:
           "Загрузите последние изменения, затем запустите локальный установщик:",
         gitPullCommand: "Команда git pull",
@@ -1718,7 +1718,7 @@ export const ru = {
           "Обнаружена установка из исходников или VCS-пакета. Переустановите из исходного локального пути или Git URL.",
         repoCheckoutFallback:
           "Если рабочая копия репозитория сохранилась, запустите из неё локальный установщик:",
-        restartAfterUpdate: "После обновления перезапустите Unsloth.",
+        restartAfterUpdate: "После обновления перезапустите SlothForge.",
         desktopManaged:
           "Настольное приложение автоматически проверяет наличие новых версий. Здесь также можно в любое время проверить наличие обновлений или установить их.",
         desktopReady: "Обновления настольного приложения",
@@ -1740,7 +1740,7 @@ export const ru = {
         desktopCurrent:
           "Установлена последняя версия настольного приложения",
         desktopCurrentDescription:
-          "Unsloth продолжит автоматически проверять наличие обновлений.",
+          "SlothForge продолжит автоматически проверять наличие обновлений.",
         checkForUpdates: "Проверить наличие обновлений",
         checkAgain: "Проверить снова",
         retryCheck: "Повторить попытку",
@@ -1748,7 +1748,7 @@ export const ru = {
         updateNow: "Обновить сейчас",
         openReleasePage: "Открыть страницу выпуска",
         unknownInstall:
-          "Не удалось определить способ установки Unsloth. Для установки через установщик или PyPI используйте команды выше.",
+          "Не удалось определить способ установки SlothForge. Для установки через установщик или PyPI используйте команды выше.",
         localCheckout:
           "Для установки из локальной рабочей копии запустите установщик из этой копии:",
         docs: "Документация по установке:",
@@ -2224,7 +2224,7 @@ export const ru = {
       checkingDataset: "Проверка датасета...",
       startFailed: "Не удалось запустить обучение",
       startUnconfirmed:
-        "Unsloth не удалось подтвердить запуск обучения. Состояние проверяется в фоновом режиме.",
+        "SlothForge не удалось подтвердить запуск обучения. Состояние проверяется в фоновом режиме.",
       stopFailed: "Не удалось остановить обучение",
       trainingStillActiveTitle: "Обучение ещё выполняется",
       stopBeforeConfig:

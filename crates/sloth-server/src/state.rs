@@ -215,6 +215,52 @@ impl TrainingSession {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadState {
+    pub job_key: String,
+    pub generation: u64,
+    pub state: String,
+    pub percent: f32,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub repo_id: String,
+    pub variant: String,
+    pub filename: String,
+}
+
+impl Default for DownloadState {
+    fn default() -> Self {
+        Self {
+            job_key: "job-default".to_string(),
+            generation: 1,
+            state: "idle".to_string(),
+            percent: 0.0,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            repo_id: String::new(),
+            variant: String::new(),
+            filename: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatSettingsState {
+    pub temperature: f64,
+    pub top_p: f64,
+    pub max_tokens: usize,
+}
+
+impl Default for ChatSettingsState {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            top_p: 0.9,
+            max_tokens: 2048,
+        }
+    }
+}
+
 pub struct AppState {
     pub vk_ctx: Option<VulkanContext>,
     pub coordinator: Arc<ClusterCoordinator>,
@@ -224,6 +270,12 @@ pub struct AppState {
     pub static_dir: Option<PathBuf>,
     pub master_gradients: Arc<RwLock<Vec<f32>>>,
     pub training_mutex: Arc<Mutex<()>>,
+    pub download_state: Arc<RwLock<DownloadState>>,
+    pub download_cancel: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
+    pub active_inference_model: Arc<RwLock<String>>,
+    pub chat_settings: Arc<RwLock<ChatSettingsState>>,
+    pub vram_budget_mb: Arc<AtomicU64>,
+    pub upload_limit_bytes: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -245,6 +297,12 @@ impl AppState {
             static_dir,
             master_gradients,
             training_mutex: Arc::new(Mutex::new(())),
+            download_state: Arc::new(RwLock::new(DownloadState::default())),
+            download_cancel: Arc::new(RwLock::new(None)),
+            active_inference_model: Arc::new(RwLock::new("llama-3.2-3b-instruct-q4_k_m".to_string())),
+            chat_settings: Arc::new(RwLock::new(ChatSettingsState::default())),
+            vram_budget_mb: Arc::new(AtomicU64::new(4096)),
+            upload_limit_bytes: Arc::new(AtomicU64::new(10737418240)),
         }
     }
 }
