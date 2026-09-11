@@ -174,29 +174,19 @@ function CredentialBootstrapGate({
   active: boolean;
   children: ReactNode;
 }) {
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(true);
   const runRevision = useRef(0);
 
   useEffect(() => {
     if (!active) {
       runRevision.current += 1;
-      setReady(false);
       return;
     }
     let mounted = true;
     const reconcile = () => {
       const revision = ++runRevision.current;
-      if (!hasAuthToken()) {
-        setReady(false);
-        return;
-      }
-      setReady(false);
       void bootstrapPersistedCredentials().finally(() => {
-        if (
-          mounted &&
-          revision === runRevision.current &&
-          hasAuthToken()
-        ) {
+        if (mounted && revision === runRevision.current) {
           setReady(true);
         }
       });
@@ -214,8 +204,8 @@ function CredentialBootstrapGate({
   }, [active]);
   return (
     <>
-      <SettingsDialogMount active={active && ready} />
-      {active && !ready ? <RouteFallback /> : children}
+      <SettingsDialogMount active={active} />
+      {children}
     </>
   );
 }

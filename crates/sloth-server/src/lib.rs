@@ -7,7 +7,7 @@ pub mod state;
 pub mod training;
 
 use axum::{
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use handlers::*;
@@ -68,7 +68,19 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         // Cluster Endpoints
         .route("/cluster/worker/register", post(cluster::handle_register_worker))
         .route("/cluster/sync_grad", post(cluster::handle_sync_grad))
-        .route("/cluster/status", get(cluster::handle_cluster_status));
+        .route("/cluster/status", get(cluster::handle_cluster_status))
+        // Settings & Credentials Endpoints
+        .route("/auth/refresh", post(api::handle_auth_refresh).get(api::handle_auth_refresh))
+        .route("/auth/logout", post(api::handle_auth_logout))
+        .route("/settings/hugging-face-token", get(api::handle_hf_token_get).put(api::handle_hf_token_put).delete(api::handle_hf_token_delete))
+        .route("/settings/hugging-face-token/migrate", put(api::handle_hf_token_put))
+        .route("/settings/generation-presets/:kind", get(api::handle_generation_presets).put(api::handle_generation_presets))
+        .route("/settings/generation-presets/:kind/custom", get(api::handle_generation_presets).put(api::handle_generation_presets))
+        .route("/providers/registry", get(api::handle_providers_registry))
+        .route("/providers", get(api::handle_providers_list))
+        .route("/providers/", get(api::handle_providers_list))
+        // Fallback for unmatched /api/* calls so they never receive index.html
+        .fallback(api::handle_api_not_found);
 
     // Base App Router with all endpoints
     let mut app = Router::new()

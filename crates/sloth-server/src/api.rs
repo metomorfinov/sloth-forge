@@ -607,3 +607,61 @@ pub async fn handle_start_request_cancel(
         "error": null
     }))
 }
+
+pub async fn handle_hf_token_get() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "has_token": false,
+        "token": null
+    }))
+}
+
+pub async fn handle_hf_token_put(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    let token = payload.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    Json(serde_json::json!({
+        "has_token": !token.is_empty(),
+        "token": if token.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(token.to_string()) }
+    }))
+}
+
+pub async fn handle_hf_token_delete() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "has_token": false,
+        "token": null
+    }))
+}
+
+pub async fn handle_providers_registry() -> Json<serde_json::Value> {
+    Json(serde_json::json!([]))
+}
+
+pub async fn handle_providers_list() -> Json<serde_json::Value> {
+    Json(serde_json::json!([]))
+}
+
+pub async fn handle_auth_refresh() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "access_token": "sloth_local_token",
+        "refresh_token": "sloth_local_refresh",
+        "must_change_password": false
+    }))
+}
+
+pub async fn handle_auth_logout() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok"
+    }))
+}
+
+pub async fn handle_generation_presets() -> Json<serde_json::Value> {
+    Json(serde_json::json!({}))
+}
+
+pub async fn handle_api_not_found(uri: axum::http::Uri) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "API endpoint not found",
+            "path": uri.path()
+        })),
+    )
+}
