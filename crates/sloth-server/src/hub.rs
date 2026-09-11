@@ -128,11 +128,158 @@ pub async fn handle_active_downloads(
 }
 
 #[derive(Debug, Deserialize)]
+struct HfLfsInfo {
+    size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct HfTreeItem {
     #[serde(rename = "type")]
     entry_type: String,
     path: String,
     size: Option<u64>,
+    lfs: Option<HfLfsInfo>,
+}
+
+/// Known quant patterns in descending specificity
+const KNOWN_QUANTS: &[&str] = &[
+    // Unsloth Dynamic (UD) variants
+    "UD-Q8_K_XL", "UD-Q6_K_XL", "UD-Q5_K_XL", "UD-Q4_K_XL", "UD-Q3_K_XL", "UD-Q2_K_XL",
+    "UD-IQ4_XS", "UD-IQ4_NL", "UD-IQ3_XXS", "UD-IQ3_S", "UD-IQ2_XXS", "UD-IQ2_M", "UD-IQ1_S", "UD-IQ1_M",
+    // Standard K-quants & legacy
+    "Q8_K_XL", "Q6_K_XL", "Q5_K_XL", "Q4_K_XL", "Q3_K_XL", "Q2_K_XL",
+    "Q8_0", "Q8_1",
+    "Q6_K_L", "Q6_K_M", "Q6_K",
+    "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0",
+    "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0",
+    "Q3_K_XL", "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q3_1", "Q3_0",
+    "Q2_K_L", "Q2_K", "Q2_0",
+    // Importance quants (IQ)
+    "IQ4_NL", "IQ4_XS", "IQ3_M", "IQ3_S", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XXS", "IQ1_M", "IQ1_S",
+    // Unquantized / Float
+    "BF16", "FP16", "F16", "FP32", "F32",
+];
+
+/// Returns true if a path refers to auxiliary files that are NOT the base model weights
+/// (e.g. MTP speculative decoding heads, vision projector, draft models, VAE, etc.)
+fn is_auxiliary_gguf_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let filename = path.split('/').last().unwrap_or(path).to_lowercase();
+
+    // MTP (Multi-Token Prediction) speculative decoding auxiliary weights
+    if lower.starts_with("mtp/")
+        || lower.contains("/mtp/")
+        || lower.contains("/mtp-")
+        || lower.contains("/mtp_")
+        || filename.starts_with("mtp-")
+        || filename.starts_with("mtp_")
+        || filename.contains("-mtp-")
+        || filename.contains("_mtp_")
+    {
+        return true;
+    }
+
+    // Vision projector (handled separately to set has_vision = true)
+    if lower.contains("mmproj") {
+        return true;
+    }
+
+    // Speculative decoding draft models
+    if lower.contains("draft") {
+        return true;
+    }
+
+    // Diffusion VAE and text encoders
+    if lower.contains("vae") || lower.contains("text_encoder") {
+        return true;
+    }
+
+    // Standalone adapters or lora weights inside a base model repo
+    if lower.contains("adapter") {
+        return true;
+    }
+
+    false
+}
+
+/// Extracts the clean quant variant name from a GGUF file path
+fn extract_quant_from_path(p: &str) -> String {
+    let parts: Vec<&str> = p.split('/').collect();
+
+    // 1. If file is organized in a subfolder, check if the folder name specifies the quant
+    if parts.len() > 1 {
+        let folder = parts[0];
+        // Check exact match with known quants first (e.g. "UD-Q4_K_XL", "Q8_0", "BF16")
+        for &q in KNOWN_QUANTS {
+            if folder.eq_ignore_ascii_case(q) {
+                return q.to_string();
+            }
+        }
+        // Check if folder contains a known quant (e.g. "DeepSeek-R1-Q4_K_M")
+        for &q in KNOWN_QUANTS {
+            if folder.contains(q) {
+                return q.to_string();
+            }
+        }
+    }
+
+    // 2. Check filename for known quant
+    let filename = parts.last().unwrap_or(&p);
+    for &q in KNOWN_QUANTS {
+        if filename.contains(q) {
+            return q.to_string();
+        }
+    }
+
+    // 3. Fallback: use folder name if present, else filename stem
+    if parts.len() > 1 {
+        parts[0].to_string()
+    } else {
+        filename.trim_end_matches(".gguf").to_string()
+    }
+}
+
+pub fn estimate_model_quant_sizes(repo_id: &str) -> (u64, u64, bool) {
+    let repo_lower = repo_id.to_lowercase();
+    let repo_name = repo_lower.split('/').last().unwrap_or(&repo_lower);
+
+    // 1. Massive MoE models (671B / DeepSeek V3 / R1 base)
+    if (repo_name.contains("deepseek") || repo_name.contains("r1") || repo_name.contains("v3"))
+        && !repo_name.contains("distill")
+        && !repo_name.contains("7b")
+        && !repo_name.contains("8b")
+        && !repo_name.contains("1.5b")
+        && !repo_name.contains("14b")
+        && !repo_name.contains("32b")
+        && !repo_name.contains("70b")
+    {
+        return (376_000_000_000, 664_000_000_000, false);
+    }
+
+    // 2. Explicit parameter scales in repo name
+    if repo_name.contains("405b") {
+        (240_000_000_000, 430_000_000_000, false)
+    } else if repo_name.contains("284b") || repo_name.contains("deepseek-v4") {
+        (155_000_000_000, 280_000_000_000, false)
+    } else if repo_name.contains("120b") || repo_name.contains("128b") || repo_name.contains("110b") {
+        (70_000_000_000, 130_000_000_000, false)
+    } else if repo_name.contains("70b") || repo_name.contains("72b") {
+        (40_000_000_000, 75_000_000_000, false)
+    } else if repo_name.contains("32b") || repo_name.contains("34b") || repo_name.contains("30b") || repo_name.contains("35b") || repo_name.contains("glm-5") {
+        (19_500_000_000, 35_000_000_000, false)
+    } else if repo_name.contains("14b") || repo_name.contains("13b") || repo_name.contains("12b") {
+        (8_500_000_000, 15_000_000_000, false)
+    } else if repo_name.contains("8b") || repo_name.contains("9b") || repo_name.contains("7b") || repo_name.contains("6.7b") {
+        (4_800_000_000, 8_500_000_000, false)
+    } else if repo_name.contains("3.8-flash") || repo_name.contains("qwen3.8") {
+        (111_000_000_000, 195_000_000_000, false)
+    } else if repo_name.contains("3b") || repo_name.contains("3.2b") || repo_name.contains("3.8b") || repo_name.contains("4b") {
+        (2_100_000_000, 3_800_000_000, true) // fits 4GB RX 570
+    } else if repo_name.contains("1.5b") || repo_name.contains("1b") || repo_name.contains("2b") || repo_name.contains("0.5b") {
+        (950_000_000, 1_700_000_000, true) // fits 4GB RX 570
+    } else {
+        (4_800_000_000, 8_500_000_000, false)
+    }
 }
 
 pub async fn fetch_hf_tree_variants(
@@ -174,10 +321,16 @@ pub async fn fetch_hf_tree_variants(
     for item in items {
         if item.entry_type == "file" {
             let p = item.path;
-            let sz = item.size.unwrap_or(0);
-            if p.contains("mmproj-") {
+            let sz = item.lfs.as_ref().and_then(|l| l.size).or(item.size).unwrap_or(0);
+            let p_lower = p.to_lowercase();
+            if p_lower.contains("mmproj") {
                 has_vision = true;
-            } else if p.ends_with(".gguf") {
+                continue;
+            }
+            if is_auxiliary_gguf_file(&p) {
+                continue;
+            }
+            if p.ends_with(".gguf") {
                 gguf_files.push((p, sz));
             }
         }
@@ -187,37 +340,11 @@ pub async fn fetch_hf_tree_variants(
         return None;
     }
 
-    // Known quant patterns in descending specificity
-    const KNOWN_QUANTS: &[&str] = &[
-        "UD-Q8_K_XL", "UD-Q6_K_XL", "UD-Q5_K_XL", "UD-Q4_K_XL", "UD-Q3_K_XL", "UD-Q2_K_XL",
-        "UD-IQ4_XS", "UD-IQ3_XXS", "UD-IQ3_S", "UD-IQ2_XXS", "UD-IQ2_M", "UD-IQ1_S", "UD-IQ1_M",
-        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0",
-        "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0",
-        "Q3_K_L", "Q3_K_M", "Q3_K_S", "Q2_K_L", "Q2_K",
-        "IQ4_NL", "IQ4_XS", "IQ3_M", "IQ3_S", "IQ3_XXS", "IQ2_M", "IQ2_S", "IQ2_XXS", "IQ1_M", "IQ1_S",
-        "BF16", "F16", "FP16",
-    ];
-
     // Group files by quant: quant -> (quant, Vec<path>, total_bytes)
     let mut groups: std::collections::BTreeMap<String, (String, Vec<String>, u64)> = std::collections::BTreeMap::new();
 
     for (p, sz) in gguf_files {
-        let mut matched_quant: Option<&str> = None;
-        for &q in KNOWN_QUANTS {
-            if p.contains(q) {
-                matched_quant = Some(q);
-                break;
-            }
-        }
-
-        let quant = if let Some(q) = matched_quant {
-            q.to_string()
-        } else if p.contains('/') {
-            p.split('/').next().unwrap_or("Q4_K_M").to_string()
-        } else {
-            p.trim_end_matches(".gguf").to_string()
-        };
-
+        let quant = extract_quant_from_path(&p);
         let group_key = quant.clone();
         let entry = groups.entry(group_key).or_insert_with(|| (quant.clone(), Vec::new(), 0));
         entry.1.push(p);
@@ -228,20 +355,38 @@ pub async fn fetch_hf_tree_variants(
     sorted_keys.sort_by(|a, b| {
         fn score(k: &str) -> usize {
             if k == "Q4_K_M" || k == "UD-Q4_K_XL" { 0 }
-            else if k == "Q5_K_M" || k == "UD-Q5_K_XL" { 1 }
-            else if k == "Q8_0" || k == "UD-Q8_K_XL" { 2 }
-            else if k.starts_with("Q4_") || k.starts_with("UD-IQ4_") { 3 }
-            else if k.starts_with("Q5_") { 4 }
-            else if k.starts_with("Q3_") || k.starts_with("UD-Q3_") { 5 }
-            else if k.starts_with("Q6_") { 6 }
+            else if k == "UD-IQ4_XS" || k == "Q4_K_S" || k == "Q4_0" || k == "IQ4_NL" || k == "IQ4_XS" { 1 }
+            else if k == "Q5_K_M" || k == "UD-Q5_K_XL" || k == "Q5_K_S" || k == "Q5_0" { 2 }
+            else if k == "Q8_0" || k == "UD-Q8_K_XL" { 3 }
+            else if k.starts_with("Q3_") || k.starts_with("UD-Q3_") || k.starts_with("IQ3_") { 4 }
+            else if k.starts_with("Q6_") || k.starts_with("UD-Q6_") { 5 }
+            else if k.starts_with("Q2_") || k.starts_with("UD-Q2_") || k.starts_with("IQ2_") { 6 }
+            else if k.starts_with("IQ1_") || k.starts_with("UD-IQ1_") { 7 }
+            else if k == "BF16" || k == "F16" || k == "FP16" { 8 }
             else { 10 }
         }
         score(a).cmp(&score(b))
     });
 
+    let preferred_defaults = [
+        "Q4_K_M",
+        "UD-Q4_K_XL",
+        "UD-IQ4_XS",
+        "Q4_K_S",
+        "Q4_0",
+        "Q5_K_M",
+        "UD-Q5_K_XL",
+        "Q8_0",
+    ];
+    let mut default_variant = sorted_keys.first().cloned().unwrap_or_else(|| "Q4_K_M".to_string());
+    for pref in preferred_defaults {
+        if groups.contains_key(pref) {
+            default_variant = pref.to_string();
+            break;
+        }
+    }
+
     let mut variants: Vec<serde_json::Value> = Vec::new();
-    let mut default_variant = "Q4_K_M".to_string();
-    let mut found_default = false;
 
     for key in sorted_keys {
         if let Some((quant, shard_paths, total_bytes)) = groups.remove(&key) {
@@ -258,11 +403,6 @@ pub async fn fetch_hf_tree_variants(
             } else {
                 quant.clone()
             };
-
-            if !found_default {
-                default_variant = quant.clone();
-                found_default = true;
-            }
 
             variants.push(serde_json::json!({
                 "filename": first_file,
@@ -319,21 +459,7 @@ pub async fn handle_gguf_variants(
         )
     } else {
         let repo_part = repo_id.split('/').last().unwrap_or(&repo_id);
-        let (q4_sz, q8_sz, rec) = if repo_lower.contains("284b") || repo_lower.contains("deepseek-v4") || repo_lower.contains("deepseek") {
-            (155_000_000_000u64, 280_000_000_000u64, false)
-        } else if repo_lower.contains("70b") {
-            (40_000_000_000u64, 75_000_000_000u64, false)
-        } else if repo_lower.contains("32b") || repo_lower.contains("30b") || repo_lower.contains("glm-5") || repo_lower.contains("glm") {
-            (20_000_000_000u64, 36_000_000_000u64, false)
-        } else if repo_lower.contains("14b") {
-            (8_500_000_000u64, 15_000_000_000u64, false)
-        } else if repo_lower.contains("8b") || repo_lower.contains("7b") {
-            (4_800_000_000u64, 8_500_000_000u64, false)
-        } else if repo_lower.contains("1b") || repo_lower.contains("0.5b") {
-            (800_000_000u64, 1_500_000_000u64, true)
-        } else {
-            (2_500_000_000u64, 4_500_000_000u64, true)
-        };
+        let (q4_sz, q8_sz, rec) = estimate_model_quant_sizes(&repo_id);
         (
             format!("{}-Q4_K_M.gguf", repo_part),
             format!("{}-Q8_0.gguf", repo_part),
@@ -461,12 +587,11 @@ pub async fn handle_download_start(
                 }
             })
         }).unwrap_or_else(|| {
-            if repo_id.to_lowercase().contains("deepseek") || repo_id.to_lowercase().contains("284b") {
-                155_000_000_000u64
-            } else if variant.contains("Q8_0") || filename.contains("Q8_0") {
-                3_800_000_000u64
+            let (est_q4, est_q8, _) = estimate_model_quant_sizes(&repo_id);
+            if variant.contains("Q8_0") || filename.contains("Q8_0") {
+                est_q8
             } else {
-                2_023_751_680u64
+                est_q4
             }
         })
     };

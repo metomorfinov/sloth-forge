@@ -149,6 +149,9 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelCard> {
                         found_filenames.insert(filename.clone());
                         let metadata = entry.metadata().ok();
                         let size_bytes = metadata.map(|m| m.len()).unwrap_or(0);
+                        if size_bytes < 1024 * 1024 {
+                            continue;
+                        }
 
                         // Try to parse GGUF headers
                         if let Ok(gguf) = GGUFFile::open(&path) {
