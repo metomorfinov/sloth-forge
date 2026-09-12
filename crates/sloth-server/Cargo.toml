@@ -23,3 +23,5 @@ sysinfo = "0.33"
 
 [dev-dependencies]
 tokio-tungstenite = "0.23"
+# Временные папки для тестов песочницы путей (уже используется в sloth-core)
+tempfile = "3.10"

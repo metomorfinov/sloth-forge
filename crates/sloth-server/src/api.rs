@@ -848,14 +848,8 @@ pub async fn handle_inference_load(
 
     let is_vision = model.to_lowercase().contains("vision") || model.to_lowercase().contains("-vl");
 
-    // Look for actual file on disk
-    let candidates = [
-        state.models_dir.join(&model),
-        PathBuf::from(&model),
-        state.models_dir.join(format!("{}.gguf", model)),
-        PathBuf::from(format!("{}.gguf", model)),
-    ];
-    let file_path = candidates.into_iter().find(|p| p.exists());
+    // Файл ищем только внутри папки моделей и scan-folders (песочница путей)
+    let file_path = crate::hub::resolve_local_gguf_file(&state, &model).await;
 
     let mut context_len = 131072u64;
     let file_len = if let Some(ref path) = file_path {
@@ -1046,9 +1040,13 @@ pub async fn handle_inference_estimate_memory(
             }
         });
 
-    let kv_bytes = n_ctx * 65536;
-    let compute_bytes = 150 * 1024 * 1024;
-    let total_bytes = weights_bytes + kv_bytes + compute_bytes;
+    // Грубая оценка до шага 6 (там будет формула из метаданных GGUF).
+    // saturating_* — чтобы огромный n_ctx из запроса не переполнял u64.
+    const KV_BYTES_PER_TOKEN_ESTIMATE: u64 = 65536;
+    const COMPUTE_BYTES_ESTIMATE: u64 = 150 * 1024 * 1024;
+    let kv_bytes = n_ctx.saturating_mul(KV_BYTES_PER_TOKEN_ESTIMATE);
+    let compute_bytes = COMPUTE_BYTES_ESTIMATE;
+    let total_bytes = weights_bytes.saturating_add(kv_bytes).saturating_add(compute_bytes);
 
     Json(serde_json::json!({
         "available": true,
@@ -1532,14 +1530,19 @@ pub async fn handle_settings_upload_limit(
     }))
 }
 
+/// Верхняя граница лимита загрузки файлов (совпадает с `max_allowed_upload_size_mb` в GET).
+const MAX_UPLOAD_SIZE_MB: u64 = 2048;
+const BYTES_PER_MB: u64 = 1024 * 1024;
+
 pub async fn handle_settings_upload_limit_put(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    // Значение ограничивается сверху: умножение огромного числа из запроса переполнялось
     if let Some(mb) = payload.get("max_upload_size_mb").and_then(|v| v.as_u64()) {
-        state.upload_limit_bytes.store(mb * 1024 * 1024, Ordering::Relaxed);
+        state.upload_limit_bytes.store(mb.min(MAX_UPLOAD_SIZE_MB) * BYTES_PER_MB, Ordering::Relaxed);
     } else if let Some(lim) = payload.get("limit_bytes").and_then(|v| v.as_u64()) {
-        state.upload_limit_bytes.store(lim, Ordering::Relaxed);
+        state.upload_limit_bytes.store(lim.min(MAX_UPLOAD_SIZE_MB * BYTES_PER_MB), Ordering::Relaxed);
     }
     let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
     let mb = limit / (1024 * 1024);
@@ -1941,20 +1944,52 @@ pub async fn handle_settings_current_date_prompt_put(
 pub async fn handle_model_cached_path(
     State(state): State<Arc<AppState>>,
     Query(query): Query<serde_json::Value>,
-) -> Json<serde_json::Value> {
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    use crate::error::ApiError;
+
     let model_id = query
         .get("model_id")
         .or_else(|| query.get("repo_id"))
         .or_else(|| query.get("repoId"))
         .or_else(|| query.get("model"))
         .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let path = state.models_dir.join(model_id);
-    let exists = path.exists();
-    Json(serde_json::json!({
-        "path": path.to_string_lossy().to_string(),
-        "exists": exists
-    }))
+        .unwrap_or("")
+        .trim();
+    if model_id.is_empty() {
+        return Err(ApiError::bad_request("Не указан repo_id"));
+    }
+    let variant = query
+        .get("variant")
+        .or_else(|| query.get("gguf_variant"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    // Сначала точное совпадение среди найденных на диске GGUF (тот же repo и квант),
+    // затем — путь или имя файла
+    let from_scan = crate::hub::scan_local_gguf_files(&state)
+        .await
+        .into_iter()
+        .find(|file| {
+            file.repo_id.eq_ignore_ascii_case(model_id)
+                && variant.is_none_or(|v| file.quant.eq_ignore_ascii_case(v))
+        })
+        .map(|file| file.path);
+    let found = match from_scan {
+        Some(path) => Some(path),
+        None => crate::hub::resolve_local_gguf_file(&state, model_id).await,
+    }
+    .ok_or_else(|| ApiError::not_found(format!("Модель {model_id} не найдена на диске")))?;
+
+    // Путь из сканера тоже проверяем песочницей: наружу не отдаём ничего
+    let roots = state.model_roots().await;
+    let path = crate::paths::resolve_existing_within(&roots, &found.to_string_lossy())
+        .map_err(|rejection| ApiError::from_path_rejection(rejection, "модель"))?;
+
+    Ok(Json(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "is_dir": path.is_dir()
+    })))
 }
 
 pub async fn handle_model_reveal(
@@ -1973,63 +2008,106 @@ pub async fn handle_model_kv_cache_estimate(
     }))
 }
 
+/// Максимум папок в одном ответе обзора: огромный каталог не должен подвешивать сервер и UI.
+const MAX_BROWSE_ENTRIES: usize = 2000;
+
 pub async fn handle_model_browse_folders(
+    State(state): State<Arc<AppState>>,
     Query(query): Query<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let raw_path = query.get("path").and_then(|v| v.as_str()).unwrap_or("");
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    use crate::error::ApiError;
+
+    let raw_path = query.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
     let show_hidden = query.get("show_hidden")
         .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
         .unwrap_or(false);
 
-    let target_dir = if raw_path.is_empty() || raw_path == "/" {
-        let repo_root = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge");
-        if repo_root.exists() {
-            repo_root
+    // Обзор разрешён внутри домашней папки и папок с моделями. Этого хватает, чтобы
+    // выбрать папку для сканирования, и системные каталоги остаются закрыты.
+    let model_roots = state.model_roots().await;
+    let mut browse_roots = model_roots.clone();
+    let home = crate::paths::home_dir();
+    if let Some(ref home) = home {
+        browse_roots.push(home.clone());
+    }
+
+    let requested = if raw_path.is_empty() || raw_path == "/" {
+        if state.models_dir.is_dir() {
+            state.models_dir.to_string_lossy().to_string()
         } else {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            home.as_ref()
+                .map(|h| h.to_string_lossy().to_string())
+                .ok_or_else(|| ApiError::not_found("Не найдены ни папка моделей, ни домашняя папка"))?
         }
     } else {
-        PathBuf::from(raw_path)
+        raw_path.to_string()
     };
+    let target_dir = crate::paths::resolve_existing_dir_within(&browse_roots, &requested)
+        .map_err(|rejection| ApiError::from_path_rejection(rejection, "папка"))?;
 
-    let current_str = target_dir.to_string_lossy().to_string();
-    let parent_str = target_dir.parent().map(|p| p.to_string_lossy().to_string());
+    let canonical_roots: Vec<PathBuf> = browse_roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    let suggestions: Vec<String> = model_roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .map(|r| r.to_string_lossy().to_string())
+        .collect();
+
+    // Чтение диска синхронное, поэтому выполняется вне async-потоков сервера
+    let listing = tokio::task::spawn_blocking(move || {
+        list_browse_entries(&target_dir, &canonical_roots, show_hidden, suggestions)
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("Обзор папки прерван: {err}")))?;
+
+    Ok(Json(listing))
+}
+
+/// Собирает список подпапок для обзора. `parent` отдаётся, только если он тоже внутри разрешённых корней.
+fn list_browse_entries(
+    target_dir: &std::path::Path,
+    canonical_roots: &[PathBuf],
+    show_hidden: bool,
+    suggestions: Vec<String>,
+) -> serde_json::Value {
+    let parent = target_dir
+        .parent()
+        .filter(|parent| canonical_roots.iter().any(|root| parent.starts_with(root)))
+        .map(|parent| parent.to_string_lossy().to_string());
 
     let mut entries = Vec::new();
     let mut model_files_here: usize = 0;
+    let mut truncated = false;
 
-    if target_dir.exists() && target_dir.is_dir() {
-        if let Ok(dir_entries) = std::fs::read_dir(&target_dir) {
+    match std::fs::read_dir(target_dir) {
+        Ok(dir_entries) => {
             for entry in dir_entries.flatten() {
-                let p = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_hidden = name.starts_with('.');
-
-                if p.is_file() {
+                // file_type() не следует по символическим ссылкам, поэтому ссылки наружу не показываются
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_file() {
                     if name.to_lowercase().ends_with(".gguf") {
                         model_files_here += 1;
                     }
-                } else if p.is_dir() {
-                    if is_hidden && !show_hidden {
-                        continue;
-                    }
-                    let mut has_models = false;
-                    if let Ok(sub_entries) = std::fs::read_dir(&p) {
-                        for sub in sub_entries.flatten() {
-                            if sub.file_name().to_string_lossy().to_lowercase().ends_with(".gguf") {
-                                has_models = true;
-                                break;
-                            }
-                        }
-                    }
-                    entries.push(serde_json::json!({
-                        "name": name,
-                        "has_models": has_models,
-                        "hidden": is_hidden
-                    }));
+                    continue;
                 }
+                if !file_type.is_dir() || (is_hidden && !show_hidden) {
+                    continue;
+                }
+                if entries.len() >= MAX_BROWSE_ENTRIES {
+                    truncated = true;
+                    continue;
+                }
+                entries.push(serde_json::json!({
+                    "name": name,
+                    "has_models": dir_contains_gguf(&entry.path()),
+                    "hidden": is_hidden
+                }));
             }
         }
+        Err(err) => tracing::warn!("Не удалось прочитать папку {}: {err}", target_dir.display()),
     }
 
     entries.sort_by(|a, b| {
@@ -2038,14 +2116,25 @@ pub async fn handle_model_browse_folders(
         name_a.cmp(name_b)
     });
 
-    Json(serde_json::json!({
-        "current": current_str,
-        "parent": parent_str,
+    serde_json::json!({
+        "current": target_dir.to_string_lossy(),
+        "parent": parent,
         "entries": entries,
-        "suggestions": ["models"],
-        "truncated": false,
+        "suggestions": suggestions,
+        "truncated": truncated,
         "model_files_here": model_files_here
-    }))
+    })
+}
+
+/// Есть ли в папке (без захода в подпапки) хотя бы один файл `.gguf`.
+fn dir_contains_gguf(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().to_lowercase().ends_with(".gguf"))
+        })
+        .unwrap_or(false)
 }
 
 pub async fn handle_models_checkpoints() -> Json<serde_json::Value> {

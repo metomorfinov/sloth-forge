@@ -241,60 +241,27 @@ pub async fn resolve_local_gguf_file(state: &AppState, candidate: &str) -> Optio
         return None;
     }
 
-    // Direct path check
-    let p = std::path::Path::new(candidate);
-    if p.exists() && p.is_file() {
-        return Some(p.to_path_buf());
+    // Порядок попыток: путь как прислали, затем с «.gguf», затем только имя файла
+    // (фронтенд иногда присылает «models/<файл>» или «org/repo/<файл>»)
+    let mut attempts = vec![candidate.to_string()];
+    let has_gguf_ext = candidate.to_ascii_lowercase().ends_with(".gguf");
+    if !has_gguf_ext {
+        attempts.push(format!("{candidate}.gguf"));
     }
-
-    let mut candidate_dirs = vec![state.models_dir.clone()];
-    if let Ok(parent_models) = std::path::Path::new("../../models").canonicalize() {
-        if parent_models.exists() && !candidate_dirs.contains(&parent_models) {
-            candidate_dirs.push(parent_models);
-        }
-    }
-    if let Ok(parent_models) = std::path::Path::new("../models").canonicalize() {
-        if parent_models.exists() && !candidate_dirs.contains(&parent_models) {
-            candidate_dirs.push(parent_models);
-        }
-    }
-
-    {
-        let custom_folders = state.scan_folders.read().await;
-        for folder in custom_folders.iter() {
-            let fpath = PathBuf::from(&folder.path);
-            if fpath.exists() && !candidate_dirs.contains(&fpath) {
-                candidate_dirs.push(fpath);
+    if let Some(filename) = std::path::Path::new(candidate).file_name().and_then(|name| name.to_str()) {
+        if filename != candidate {
+            attempts.push(filename.to_string());
+            if !has_gguf_ext {
+                attempts.push(format!("{filename}.gguf"));
             }
         }
     }
 
-    let filename = candidate.split('/').last().unwrap_or(candidate);
-
-    for dir in &candidate_dirs {
-        let direct = dir.join(candidate);
-        if direct.exists() && direct.is_file() {
-            return Some(direct);
-        }
-        let fname_path = dir.join(filename);
-        if fname_path.exists() && fname_path.is_file() {
-            return Some(fname_path);
-        }
-        if !candidate.ends_with(".gguf") {
-            let with_gguf = format!("{}.gguf", candidate);
-            let in_models_gguf = dir.join(&with_gguf);
-            if in_models_gguf.exists() && in_models_gguf.is_file() {
-                return Some(in_models_gguf);
-            }
-            let with_gguf_filename = format!("{}.gguf", filename);
-            let in_models_fname_gguf = dir.join(&with_gguf_filename);
-            if in_models_fname_gguf.exists() && in_models_fname_gguf.is_file() {
-                return Some(in_models_fname_gguf);
-            }
-        }
-    }
-
-    None
+    // Все попытки проходят через песочницу: файл обязан лежать внутри папки моделей или scan-folders
+    let roots = state.model_roots().await;
+    attempts
+        .iter()
+        .find_map(|attempt| crate::paths::resolve_existing_file_within(&roots, attempt).ok())
 }
 
 pub async fn handle_cached_models(
@@ -1605,7 +1572,9 @@ pub async fn handle_datasets_local_options() -> Json<serde_json::Value> {
 pub async fn handle_delete_cached(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    use crate::error::ApiError;
+
     let repo_id = payload
         .get("repo_id")
         .or_else(|| payload.get("repoId"))
@@ -1620,42 +1589,63 @@ pub async fn handle_delete_cached(
         .or_else(|| payload.get("cachePath"))
         .and_then(|v| v.as_str());
 
-    if let Some(cp) = cache_path {
-        let p = std::path::Path::new(cp);
-        if p.exists() {
-            let _ = tokio::fs::remove_file(p).await;
-        }
-    } else if let Some(v) = variant {
-        let repo_id_str = repo_id.unwrap_or("");
-        let repo_lower = repo_id_str.to_lowercase();
-        let is_llama = repo_lower.contains("llama") || repo_id_str.is_empty();
-        let repo_part = repo_id_str.split('/').last().unwrap_or("model");
+    let roots = state.model_roots().await;
 
-        let to_check = if is_llama {
-            vec![
-                state.models_dir.join(format!("model-{}.gguf", v)),
-                state.models_dir.join(format!("{}.gguf", v)),
-                state.models_dir.join(format!("Llama-3.2-3B-Instruct-{}.gguf", v)),
-            ]
-        } else {
-            vec![
-                state.models_dir.join(format!("{}-{}.gguf", repo_part, v)),
-                state.models_dir.join(format!("{}.gguf", repo_part)),
-            ]
-        };
-        for p in to_check {
-            if p.exists() {
-                let _ = tokio::fs::remove_file(p).await;
-            }
-        }
+    // Каждый путь проходит через песочницу: удалить что-либо вне папки моделей
+    // и добавленных scan-folders невозможно.
+    let targets: Vec<PathBuf> = if let Some(cp) = cache_path {
+        vec![crate::paths::resolve_existing_file_within(&roots, cp)
+            .map_err(|rejection| ApiError::from_path_rejection(rejection, "cache_path"))?]
+    } else if let Some(v) = variant {
+        // Без repo_id вариант вроде «Q4_K_M» совпал бы с файлами разных моделей
+        let repo = repo_id
+            .filter(|repo| !repo.trim().is_empty())
+            .ok_or_else(|| ApiError::bad_request("Для удаления по варианту нужен repo_id"))?;
+        // Ищем среди реально найденных на диске файлов: тот же repo и точно тот же квант
+        scan_local_gguf_files(&state)
+            .await
+            .into_iter()
+            .filter(|file| file.quant.eq_ignore_ascii_case(v) && file.repo_id.eq_ignore_ascii_case(repo))
+            .filter_map(|file| {
+                crate::paths::resolve_existing_file_within(&roots, &file.path.to_string_lossy()).ok()
+            })
+            .collect()
+    } else {
+        return Err(ApiError::bad_request("Укажите cache_path или variant"));
+    };
+
+    if targets.is_empty() {
+        return Err(ApiError::not_found("Локальные файлы этой модели не найдены"));
+    }
+    let is_gguf = |path: &PathBuf| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    };
+    if !targets.iter().all(is_gguf) {
+        return Err(ApiError::forbidden("Удалять можно только файлы моделей .gguf"));
     }
 
-    info!("delete_cached processed for repo_id={:?}, variant={:?}", repo_id, variant);
+    let mut deleted_files = Vec::with_capacity(targets.len());
+    for target in &targets {
+        tokio::fs::remove_file(target).await.map_err(|err| {
+            ApiError::internal(format!("Не удалось удалить {}: {err}", target.display()))
+        })?;
+        deleted_files.push(target.to_string_lossy().to_string());
+    }
 
-    Json(serde_json::json!({
+    // Флаги «Downloaded» в кэше вариантов больше не соответствуют диску
+    state.gguf_variants_cache.write().await.clear();
+    info!(
+        "Удалены файлы модели repo_id={:?}, variant={:?}: {:?}",
+        repo_id, variant, deleted_files
+    );
+
+    Ok(Json(serde_json::json!({
         "status": "ok",
-        "deleted": true
-    }))
+        "deleted": true,
+        "deleted_files": deleted_files
+    })))
 }
 
 pub async fn handle_hub_scan_folders(

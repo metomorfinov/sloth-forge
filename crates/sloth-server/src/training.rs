@@ -206,6 +206,14 @@ pub struct ResolvedHyperparams {
     pub mode_name: String,
 }
 
+/// Верхние границы параметров из запроса. Без них `{"lora_rank": 1000000}` выделял
+/// десятки гигабайт памяти, а `epochs * 250` переполнял u32.
+pub const MAX_LORA_RANK: usize = 1024;
+pub const MAX_EPOCHS: u32 = 1000;
+pub const MAX_TOTAL_STEPS: u32 = 1_000_000;
+/// Оценка шагов на эпоху, пока нет реального размера датасета.
+const ESTIMATED_STEPS_PER_EPOCH: u32 = 250;
+
 pub fn resolve_hyperparameters(req: &TrainStartRequest) -> ResolvedHyperparams {
     let mode = req.mode.as_deref().unwrap_or("auto");
     let preset = req.preset.as_deref().unwrap_or("");
@@ -213,11 +221,14 @@ pub fn resolve_hyperparameters(req: &TrainStartRequest) -> ResolvedHyperparams {
     let is_pro = mode == "pro" || (preset.is_empty() && req.lora_rank.is_some());
 
     if is_pro {
-        let rank = req.lora_rank.unwrap_or(16);
+        let rank = req.lora_rank.unwrap_or(16).min(MAX_LORA_RANK);
         let alpha = req.lora_alpha.unwrap_or(32.0);
         let lr = req.learning_rate.unwrap_or(2e-4);
-        let epochs = req.epochs.unwrap_or(3);
-        let steps = req.total_steps.unwrap_or(epochs * 250);
+        let epochs = req.epochs.unwrap_or(3).min(MAX_EPOCHS);
+        let steps = req
+            .total_steps
+            .unwrap_or(epochs.saturating_mul(ESTIMATED_STEPS_PER_EPOCH))
+            .min(MAX_TOTAL_STEPS);
         let modules = req.target_modules.clone().unwrap_or_else(|| {
             vec![
                 "q_proj".to_string(),
@@ -325,11 +336,14 @@ pub fn resolve_hyperparameters(req: &TrainStartRequest) -> ResolvedHyperparams {
             }
         }
 
-        let epochs = req.epochs.unwrap_or(base_epochs);
-        let total_steps = req.total_steps.unwrap_or(epochs * 250);
+        let epochs = req.epochs.unwrap_or(base_epochs).min(MAX_EPOCHS);
+        let total_steps = req
+            .total_steps
+            .unwrap_or(epochs.saturating_mul(ESTIMATED_STEPS_PER_EPOCH))
+            .min(MAX_TOTAL_STEPS);
 
         ResolvedHyperparams {
-            rank: req.lora_rank.unwrap_or(base_rank),
+            rank: req.lora_rank.unwrap_or(base_rank).min(MAX_LORA_RANK),
             alpha: req.lora_alpha.unwrap_or(base_alpha),
             dropout: 0.0,
             learning_rate: req.learning_rate.unwrap_or(base_lr),

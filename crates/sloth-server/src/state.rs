@@ -372,4 +372,18 @@ impl AppState {
             model_load_progress: Arc::new(RwLock::new(LoadProgressState::default())),
         }
     }
+
+    /// Папки, внутри которых API разрешено искать, открывать и удалять модели:
+    /// основная папка моделей и добавленные пользователем scan-folders.
+    pub async fn model_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.models_dir.clone()];
+        roots.extend(
+            self.scan_folders
+                .read()
+                .await
+                .iter()
+                .map(|folder| PathBuf::from(&folder.path)),
+        );
+        roots
+    }
 }

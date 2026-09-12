@@ -1,9 +1,12 @@
 pub mod api;
 pub mod chat;
 pub mod cluster;
+pub mod error;
 pub mod handlers;
 pub mod hub;
 pub mod models;
+pub mod paths;
+pub mod security;
 pub mod state;
 pub mod training;
 
@@ -17,7 +20,6 @@ pub use state::AppState;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -27,10 +29,8 @@ pub fn server_version() -> &'static str {
 }
 
 pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Ответы API читаются только страницами с этого компьютера (см. security.rs)
+    let cors = security::cors_layer();
 
     // API Routes (/api/*)
     let api_router = Router::new()
@@ -251,7 +251,9 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         }
     }
 
-    app
+    // Проверка Host — самый внешний слой: запрос с чужим именем хоста отклоняется
+    // раньше, чем дойдёт до API или статики
+    app.layer(axum::middleware::from_fn(security::enforce_allowed_host))
 }
 
 pub async fn run_server_with_listener(

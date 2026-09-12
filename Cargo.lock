@@ -1406,6 +1406,7 @@ dependencies = [
  "sloth-core",
  "sloth-vulkan-sys",
  "sysinfo",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.23.1",

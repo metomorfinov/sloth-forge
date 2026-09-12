@@ -1286,21 +1286,23 @@ async fn test_hub_delete_cached_model() {
     let (base_url, _) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // 1. POST /api/hub/delete-cached
+    // Такой модели на диске нет: оба метода обязаны честно ответить 404, а не «deleted: true».
+    // Успешное удаление и отказ вне папки моделей проверяются в tests/security_tests.rs.
     let payload = serde_json::json!({
         "repo_id": "unsloth/test-model",
         "variant": "Q4_K_M"
     });
+
+    // 1. POST /api/hub/delete-cached
     let resp = client
         .post(format!("{base_url}/api/hub/delete-cached"))
         .json(&payload)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"].as_str(), Some("ok"));
-    assert_eq!(body["deleted"].as_bool(), Some(true));
+    assert!(body["detail"].is_string());
 
     // 2. DELETE /api/hub/delete-cached
     let resp = client
@@ -1309,10 +1311,9 @@ async fn test_hub_delete_cached_model() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"].as_str(), Some("ok"));
-    assert_eq!(body["deleted"].as_bool(), Some(true));
+    assert!(body["detail"].is_string());
 }
 
 #[tokio::test]
@@ -1530,11 +1531,11 @@ async fn test_audited_endpoints_and_schemas() {
     assert_eq!(tc["http"]["available"].as_bool(), Some(true));
     assert_eq!(tc["xet"]["available"].as_bool(), Some(false));
 
-    // 6. Model path and reveal
+    // 6. Model path and reveal: несуществующая модель — честный 404 с пояснением в detail
     let resp = client.get(format!("{base_url}/api/models/cached-model-path?repo_id=test/model")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     let mp: serde_json::Value = resp.json().await.unwrap();
-    assert!(mp["path"].is_string());
+    assert!(mp["detail"].is_string());
 
     let resp = client.post(format!("{base_url}/api/models/reveal-cached-model"))
         .json(&serde_json::json!({ "repo_id": "test/model" }))

@@ -2,6 +2,9 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Адрес по умолчанию: только этот компьютер.
+const DEFAULT_HOST: &str = "127.0.0.1";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -12,7 +15,12 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    // По умолчанию сервер доступен только с этого компьютера. Открыть его в локальную
+    // сеть можно явно: SLOTH_HOST=0.0.0.0 (и добавить свой адрес в SLOTH_ALLOWED_HOSTS).
+    // SLOTH_HOST проверяется первым, потому что HOST некоторые оболочки заполняют именем машины.
+    let host = std::env::var("SLOTH_HOST")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| DEFAULT_HOST.to_string());
     let explicit_port: Option<u16> = std::env::var("PORT")
         .or_else(|_| std::env::var("SLOTH_PORT"))
         .ok()
