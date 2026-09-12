@@ -24,3 +24,4 @@ data/raw/
 .idea/
 .DS_Store
 *.swp
+server.log
