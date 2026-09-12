@@ -781,10 +781,31 @@ pub async fn handle_inference_load(
 ) -> Json<serde_json::Value> {
     let model = payload
         .get("model_path")
+        .or_else(|| payload.get("modelPath"))
         .or_else(|| payload.get("model"))
+        .or_else(|| payload.get("model_id"))
+        .or_else(|| payload.get("modelId"))
+        .or_else(|| payload.get("repo_id"))
+        .or_else(|| payload.get("repoId"))
+        .or_else(|| payload.get("path"))
+        .or_else(|| payload.get("filename"))
+        .or_else(|| payload.get("load_id"))
+        .or_else(|| payload.get("loadId"))
         .and_then(|v| v.as_str())
         .unwrap_or("llama-3.2-3b-instruct-q4_k_m")
         .to_string();
+
+    let display_name = if let Some(stripped) = model.strip_prefix("models/") {
+        stripped.trim_end_matches(".gguf").to_string()
+    } else if model.ends_with(".gguf") {
+        model.trim_end_matches(".gguf").to_string()
+    } else if let Some(last_part) = model.split('/').last() {
+        last_part.trim_end_matches("-GGUF").to_string()
+    } else {
+        model.clone()
+    };
+
+    let is_vision = model.to_lowercase().contains("vision") || model.to_lowercase().contains("-vl");
 
     {
         let mut active = state.active_inference_model.write().await;
@@ -794,8 +815,8 @@ pub async fn handle_inference_load(
     Json(serde_json::json!({
         "status": "ok",
         "model": model,
-        "display_name": model,
-        "is_vision": false,
+        "display_name": display_name,
+        "is_vision": is_vision,
         "is_lora": false,
         "is_gguf": true,
         "is_local_model": true,
@@ -820,18 +841,37 @@ pub async fn handle_inference_validate(
 ) -> Json<serde_json::Value> {
     let model = payload
         .get("model_path")
+        .or_else(|| payload.get("modelPath"))
         .or_else(|| payload.get("model"))
+        .or_else(|| payload.get("model_id"))
+        .or_else(|| payload.get("modelId"))
+        .or_else(|| payload.get("repo_id"))
+        .or_else(|| payload.get("repoId"))
+        .or_else(|| payload.get("path"))
+        .or_else(|| payload.get("filename"))
         .and_then(|v| v.as_str())
         .unwrap_or("llama-3.2-3b-instruct-q4_k_m");
+
+    let display_name = if let Some(stripped) = model.strip_prefix("models/") {
+        stripped.trim_end_matches(".gguf")
+    } else if model.ends_with(".gguf") {
+        model.trim_end_matches(".gguf")
+    } else if let Some(last_part) = model.split('/').last() {
+        last_part.trim_end_matches("-GGUF")
+    } else {
+        model
+    };
+
+    let is_vision = model.to_lowercase().contains("vision") || model.to_lowercase().contains("-vl");
 
     Json(serde_json::json!({
         "valid": true,
         "message": "Model is valid",
         "identifier": model,
-        "display_name": model,
+        "display_name": display_name,
         "is_gguf": true,
         "context_length": 131072,
-        "is_vision": false,
+        "is_vision": is_vision,
         "is_lora": false
     }))
 }
@@ -1439,11 +1479,17 @@ pub async fn handle_model_cached_path(
     State(state): State<Arc<AppState>>,
     Query(query): Query<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    let model_id = query.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+    let model_id = query
+        .get("model_id")
+        .or_else(|| query.get("repo_id"))
+        .or_else(|| query.get("repoId"))
+        .or_else(|| query.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let path = state.models_dir.join(model_id);
     let exists = path.exists();
     Json(serde_json::json!({
-        "path": if exists { Some(path.to_string_lossy().to_string()) } else { None },
+        "path": path.to_string_lossy().to_string(),
         "exists": exists
     }))
 }

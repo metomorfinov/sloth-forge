@@ -12,8 +12,12 @@ use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct RepoVariantsQuery {
-    #[serde(default, alias = "repoId")]
+    #[serde(default, alias = "repoId", alias = "model_id", alias = "modelId")]
     pub repo_id: Option<String>,
+    #[serde(default, alias = "localPath", alias = "local_file", alias = "localFile", alias = "path")]
+    pub local_path: Option<String>,
+    #[serde(default, alias = "preferLocalCache")]
+    pub prefer_local_cache: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -78,24 +82,339 @@ pub struct GgufDownloadProgressQuery {
     pub expected_bytes: Option<u64>,
 }
 
-pub async fn handle_cached_models() -> Json<serde_json::Value> {
+#[derive(Debug, Clone)]
+pub struct ScannedGgufFile {
+    pub path: PathBuf,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub mtime_epoch_secs: u64,
+    pub quant: String,
+    pub repo_id: String,
+    pub display_name: String,
+}
+
+pub fn infer_repo_id_from_gguf_filename(filename: &str) -> String {
+    let clean_filename = filename.strip_prefix("models/").unwrap_or(filename);
+    let stem = clean_filename.trim_end_matches(".gguf");
+    let lower = stem.to_lowercase();
+
+    if lower.contains("llama-3.2-1b-instruct") {
+        return "unsloth/Llama-3.2-1B-Instruct-GGUF".to_string();
+    }
+    if lower.contains("llama-3.2-3b-instruct") {
+        return "unsloth/Llama-3.2-3B-Instruct-GGUF".to_string();
+    }
+    if lower.contains("qwen2.5-1.5b-instruct") {
+        return "unsloth/Qwen2.5-1.5B-Instruct-GGUF".to_string();
+    }
+    if lower.contains("mistral-7b-instruct") {
+        return "unsloth/Mistral-7B-Instruct-v0.3-GGUF".to_string();
+    }
+
+    let quant = extract_quant_from_path(clean_filename);
+    let mut base = stem;
+    if !quant.is_empty() {
+        if let Some(s) = base.strip_suffix(&format!("-{}", quant)) {
+            base = s;
+        } else if let Some(s) = base.strip_suffix(&format!("_{}", quant)) {
+            base = s;
+        } else if let Some(s) = base.strip_suffix(&quant) {
+            base = s.trim_end_matches(['-', '_']);
+        }
+    }
+
+    if base.contains('/') {
+        base.to_string()
+    } else if base.ends_with("-GGUF") || base.ends_with("_GGUF") {
+        format!("unsloth/{}", base)
+    } else {
+        format!("unsloth/{}-GGUF", base)
+    }
+}
+
+pub fn file_matches_repo_and_quant(filename: &str, repo_id: &str, quant: &str) -> bool {
+    let f_lower = filename.to_lowercase();
+    let r_lower = repo_id.to_lowercase();
+    let r_clean = r_lower.strip_prefix("unsloth/").unwrap_or(&r_lower);
+    let r_clean = r_clean.strip_suffix("-gguf").unwrap_or(r_clean);
+    let r_clean = r_clean.strip_suffix("_gguf").unwrap_or(r_clean);
+
+    let q_lower = quant.to_lowercase();
+
+    let has_quant = f_lower.ends_with(&format!("-{}.gguf", q_lower))
+        || f_lower.ends_with(&format!("_{}.gguf", q_lower))
+        || f_lower.ends_with(&format!(".{}.gguf", q_lower))
+        || f_lower.contains(&q_lower);
+
+    if !has_quant {
+        return false;
+    }
+
+    if f_lower.contains(r_clean) || r_clean.contains(&f_lower.replace(&format!("-{}", q_lower), "").replace(".gguf", "")) {
+        return true;
+    }
+
+    let repo_tokens: Vec<&str> = r_clean.split(['-', '_', '.']).filter(|s| !s.is_empty()).collect();
+    if repo_tokens.len() >= 2 && repo_tokens.iter().all(|tok| f_lower.contains(tok)) {
+        return true;
+    }
+
+    false
+}
+
+pub async fn scan_local_gguf_files(state: &AppState) -> Vec<ScannedGgufFile> {
+    let mut dirs_to_scan = Vec::new();
+    dirs_to_scan.push(state.models_dir.clone());
+
+    if let Ok(parent_models) = std::path::Path::new("../../models").canonicalize() {
+        if parent_models.exists() && !dirs_to_scan.contains(&parent_models) {
+            dirs_to_scan.push(parent_models);
+        }
+    }
+    if let Ok(parent_models) = std::path::Path::new("../models").canonicalize() {
+        if parent_models.exists() && !dirs_to_scan.contains(&parent_models) {
+            dirs_to_scan.push(parent_models);
+        }
+    }
+
+    {
+        let custom_folders = state.scan_folders.read().await;
+        for folder in custom_folders.iter() {
+            let p = PathBuf::from(&folder.path);
+            if p.exists() && p.is_dir() && !dirs_to_scan.contains(&p) {
+                dirs_to_scan.push(p);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for dir in dirs_to_scan {
+        if !dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    if filename.ends_with(".gguf") {
+                        if !seen.insert(filename.clone()) {
+                            continue;
+                        }
+                        let metadata = entry.metadata().ok();
+                        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let mtime_epoch_secs = metadata
+                            .as_ref()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        let quant = extract_quant_from_path(&filename);
+                        let repo_id = infer_repo_id_from_gguf_filename(&filename);
+                        let display_name = filename.trim_end_matches(".gguf").to_string();
+
+                        found.push(ScannedGgufFile {
+                            path,
+                            filename,
+                            size_bytes,
+                            mtime_epoch_secs,
+                            quant,
+                            repo_id,
+                            display_name,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    found.sort_by(|a, b| a.filename.cmp(&b.filename));
+    found
+}
+
+pub async fn resolve_local_gguf_file(state: &AppState, candidate: &str) -> Option<PathBuf> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+
+    // Direct path check
+    let p = std::path::Path::new(candidate);
+    if p.exists() && p.is_file() {
+        return Some(p.to_path_buf());
+    }
+
+    let mut candidate_dirs = vec![state.models_dir.clone()];
+    if let Ok(parent_models) = std::path::Path::new("../../models").canonicalize() {
+        if parent_models.exists() && !candidate_dirs.contains(&parent_models) {
+            candidate_dirs.push(parent_models);
+        }
+    }
+    if let Ok(parent_models) = std::path::Path::new("../models").canonicalize() {
+        if parent_models.exists() && !candidate_dirs.contains(&parent_models) {
+            candidate_dirs.push(parent_models);
+        }
+    }
+
+    {
+        let custom_folders = state.scan_folders.read().await;
+        for folder in custom_folders.iter() {
+            let fpath = PathBuf::from(&folder.path);
+            if fpath.exists() && !candidate_dirs.contains(&fpath) {
+                candidate_dirs.push(fpath);
+            }
+        }
+    }
+
+    let filename = candidate.split('/').last().unwrap_or(candidate);
+
+    for dir in &candidate_dirs {
+        let direct = dir.join(candidate);
+        if direct.exists() && direct.is_file() {
+            return Some(direct);
+        }
+        let fname_path = dir.join(filename);
+        if fname_path.exists() && fname_path.is_file() {
+            return Some(fname_path);
+        }
+        if !candidate.ends_with(".gguf") {
+            let with_gguf = format!("{}.gguf", candidate);
+            let in_models_gguf = dir.join(&with_gguf);
+            if in_models_gguf.exists() && in_models_gguf.is_file() {
+                return Some(in_models_gguf);
+            }
+            let with_gguf_filename = format!("{}.gguf", filename);
+            let in_models_fname_gguf = dir.join(&with_gguf_filename);
+            if in_models_fname_gguf.exists() && in_models_fname_gguf.is_file() {
+                return Some(in_models_fname_gguf);
+            }
+        }
+    }
+
+    None
+}
+
+pub async fn handle_cached_models(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let files = scan_local_gguf_files(&state).await;
+    let mut total_size_bytes: u64 = 0;
+    let mut cached = Vec::new();
+
+    for f in files {
+        total_size_bytes += f.size_bytes;
+        cached.push(serde_json::json!({
+            "repo_id": f.repo_id,
+            "load_id": f.filename,
+            "model_format": "gguf",
+            "runtime": "llama_cpp",
+            "format_variant": f.quant,
+            "size_bytes": f.size_bytes,
+            "cache_path": f.path.to_string_lossy().to_string(),
+            "last_modified": f.mtime_epoch_secs,
+            "partial": false,
+            "pipeline_tag": "text-generation",
+            "task": "text-generation",
+            "capabilities": {
+                "can_train": true,
+                "can_chat": true,
+                "can_delete": true,
+                "can_download": false,
+                "requires_variant": false,
+                "supports_lora": true,
+                "supports_vision": false
+            }
+        }));
+    }
+
     Json(serde_json::json!({
-        "cached": [],
-        "total_size_bytes": 0
+        "cached": cached,
+        "total_size_bytes": total_size_bytes
     }))
 }
 
-pub async fn handle_cached_gguf() -> Json<serde_json::Value> {
+pub async fn handle_cached_gguf(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let files = scan_local_gguf_files(&state).await;
+    let mut total_size_bytes: u64 = 0;
+    let mut cached = Vec::new();
+
+    for f in files {
+        total_size_bytes += f.size_bytes;
+        cached.push(serde_json::json!({
+            "repo_id": f.repo_id,
+            "load_id": f.filename,
+            "model_format": "gguf",
+            "runtime": "llama_cpp",
+            "format_variant": f.quant,
+            "size_bytes": f.size_bytes,
+            "cache_path": f.path.to_string_lossy().to_string(),
+            "last_modified": f.mtime_epoch_secs,
+            "partial": false,
+            "pipeline_tag": "text-generation",
+            "task": "text-generation",
+            "capabilities": {
+                "can_train": true,
+                "can_chat": true,
+                "can_delete": true,
+                "can_download": false,
+                "requires_variant": false,
+                "supports_lora": true,
+                "supports_vision": false
+            }
+        }));
+    }
+
     Json(serde_json::json!({
-        "cached": [],
-        "total_size_bytes": 0
+        "cached": cached,
+        "total_size_bytes": total_size_bytes
     }))
 }
 
-pub async fn handle_hub_local() -> Json<serde_json::Value> {
+pub async fn handle_hub_local(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let files = scan_local_gguf_files(&state).await;
+    let count = files.len();
+    let mut local_models = Vec::new();
+
+    for f in files {
+        let relative_path = format!("models/{}", f.filename);
+        local_models.push(serde_json::json!({
+            "id": f.filename,
+            "load_id": f.filename,
+            "display_name": f.display_name,
+            "path": relative_path,
+            "size_bytes": f.size_bytes,
+            "model_format": "gguf",
+            "runtime": "llama_cpp",
+            "format_variant": f.quant,
+            "source": "models_dir",
+            "pipeline_tag": "text-generation",
+            "task": "text-generation",
+            "capabilities": {
+                "can_train": true,
+                "can_chat": true,
+                "can_delete": true,
+                "can_download": false,
+                "requires_variant": false,
+                "supports_lora": true,
+                "supports_vision": false
+            }
+        }));
+    }
+
     Json(serde_json::json!({
-        "models": [],
-        "count": 0
+        "models_dir": state.models_dir.to_string_lossy().to_string(),
+        "lmstudio_dirs": [],
+        "ollama_dirs": [],
+        "hermes_dirs": [],
+        "count": count,
+        "models": local_models
     }))
 }
 
@@ -203,7 +522,7 @@ fn is_auxiliary_gguf_file(path: &str) -> bool {
 }
 
 /// Extracts the clean quant variant name from a GGUF file path
-fn extract_quant_from_path(p: &str) -> String {
+pub fn extract_quant_from_path(p: &str) -> String {
     let parts: Vec<&str> = p.split('/').collect();
 
     // 1. If file is organized in a subfolder, check if the folder name specifies the quant
@@ -386,19 +705,46 @@ pub async fn fetch_hf_tree_variants(
         }
     }
 
+    let scanned_local = scan_local_gguf_files(state).await;
     let mut variants: Vec<serde_json::Value> = Vec::new();
 
     for key in sorted_keys {
         if let Some((quant, shard_paths, total_bytes)) = groups.remove(&key) {
             let first_file = shard_paths.first().cloned().unwrap_or_default();
-            let is_downloaded = shard_paths.iter().all(|sp| {
+            let mut is_downloaded = shard_paths.iter().all(|sp| {
                 let filename_only = sp.split('/').last().unwrap_or(sp);
-                state.models_dir.join(sp).exists() || state.models_dir.join(filename_only).exists()
+                scanned_local.iter().any(|f| {
+                    f.filename.eq_ignore_ascii_case(sp)
+                        || f.filename.eq_ignore_ascii_case(filename_only)
+                        || state.models_dir.join(sp).exists()
+                        || state.models_dir.join(filename_only).exists()
+                })
             });
+
+            if !is_downloaded {
+                for f in &scanned_local {
+                    for sp in &shard_paths {
+                        let sp_name = sp.split('/').last().unwrap_or(sp);
+                        if f.filename.eq_ignore_ascii_case(sp_name) {
+                            is_downloaded = true;
+                            break;
+                        }
+                    }
+                    if is_downloaded {
+                        break;
+                    }
+                    if file_matches_repo_and_quant(&f.filename, repo_id, &quant) {
+                        is_downloaded = true;
+                        break;
+                    }
+                }
+            }
 
             // On RX 570 4GB: only recommend if total weights <= 3.2 GB
             let is_recommended = total_bytes > 0 && total_bytes <= 3_200_000_000u64;
-            let display_label = if is_recommended {
+            let display_label = if is_downloaded {
+                format!("{} (Downloaded)", quant)
+            } else if is_recommended {
                 format!("{} (Recommended)", quant)
             } else {
                 quant.clone()
@@ -417,10 +763,14 @@ pub async fn fetch_hf_tree_variants(
         }
     }
 
+    let resolved_locally = variants.iter().any(|v| v["downloaded"].as_bool() == Some(true));
+
     let result = serde_json::json!({
         "repo_id": repo_id,
         "has_vision": has_vision,
         "default_variant": default_variant,
+        "context_length": 131072,
+        "resolved_locally": resolved_locally,
         "variants": variants
     });
 
@@ -438,7 +788,81 @@ pub async fn handle_gguf_variants(
 ) -> Json<serde_json::Value> {
     let repo_id = query
         .repo_id
+        .clone()
         .unwrap_or_else(|| "unsloth/Llama-3.2-3B-Instruct-GGUF".to_string());
+
+    // 0. Check if repo_id or local_path refers to an existing local file on disk
+    let local_candidate = query.local_path.as_deref().or(Some(&repo_id));
+    if let Some(candidate) = local_candidate {
+        if let Some(resolved_path) = resolve_local_gguf_file(&state, candidate).await {
+            let filename = resolved_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let metadata = std::fs::metadata(&resolved_path).ok();
+            let file_size = metadata.map(|m| m.len()).unwrap_or(0);
+            let quant = extract_quant_from_path(&filename);
+
+            let context_length = if let Ok(gguf) = sloth_core::gguf::GGUFFile::open(&resolved_path) {
+                gguf.context_length()
+            } else {
+                131072
+            };
+
+            return Json(serde_json::json!({
+                "repo_id": repo_id,
+                "has_vision": false,
+                "default_variant": quant,
+                "context_length": context_length,
+                "resolved_locally": true,
+                "variants": [
+                    {
+                        "filename": filename,
+                        "quant": quant,
+                        "display_label": format!("{} (Downloaded)", quant),
+                        "size_bytes": file_size,
+                        "download_size_bytes": file_size,
+                        "downloaded": true,
+                        "shard_count": 1
+                    }
+                ]
+            }));
+        }
+    }
+
+    // Also if prefer_local_cache is true, scan models for this repo
+    if query.prefer_local_cache == Some(true) {
+        let scanned = scan_local_gguf_files(&state).await;
+        let mut local_variants = Vec::new();
+        let mut def_quant = "Q4_K_M".to_string();
+
+        for f in scanned {
+            if file_matches_repo_and_quant(&f.filename, &repo_id, &f.quant) || f.repo_id.eq_ignore_ascii_case(&repo_id) {
+                def_quant = f.quant.clone();
+                local_variants.push(serde_json::json!({
+                    "filename": f.filename,
+                    "quant": f.quant,
+                    "display_label": format!("{} (Downloaded)", f.quant),
+                    "size_bytes": f.size_bytes,
+                    "download_size_bytes": f.size_bytes,
+                    "downloaded": true,
+                    "shard_count": 1
+                }));
+            }
+        }
+
+        if !local_variants.is_empty() {
+            return Json(serde_json::json!({
+                "repo_id": repo_id,
+                "has_vision": false,
+                "default_variant": def_quant,
+                "context_length": 131072,
+                "resolved_locally": true,
+                "variants": local_variants
+            }));
+        }
+    }
 
     // 1. First attempt to fetch real variants from Hugging Face tree API
     if let Some(real_val) = fetch_hf_tree_variants(&state, &repo_id).await {
@@ -447,9 +871,10 @@ pub async fn handle_gguf_variants(
 
     // 2. Offline / network fallback: accurate estimates based on architecture and parameter count
     let repo_lower = repo_id.to_lowercase();
-    let is_llama = repo_lower.contains("llama-3.2-3b") || repo_id == "unsloth/Llama-3.2-3B-Instruct-GGUF";
+    let is_llama_3b = repo_lower.contains("llama-3.2-3b") || repo_id == "unsloth/Llama-3.2-3B-Instruct-GGUF";
+    let is_llama_1b = repo_lower.contains("llama-3.2-1b") || repo_id == "unsloth/Llama-3.2-1B-Instruct-GGUF";
 
-    let (q4_filename, q8_filename, q4_size, q8_size, is_recommended) = if is_llama {
+    let (q4_default_filename, q8_default_filename, q4_default_size, q8_default_size, is_recommended) = if is_llama_3b {
         (
             "model-Q4_K_M.gguf".to_string(),
             "model-Q8_0.gguf".to_string(),
@@ -457,58 +882,137 @@ pub async fn handle_gguf_variants(
             3800000000u64,
             true,
         )
+    } else if is_llama_1b {
+        (
+            "Llama-3.2-1B-Instruct-Q4_K_M.gguf".to_string(),
+            "Llama-3.2-1B-Instruct-Q8_0.gguf".to_string(),
+            807694368u64,
+            1500000000u64,
+            true,
+        )
     } else {
         let repo_part = repo_id.split('/').last().unwrap_or(&repo_id);
+        let clean_repo_part = repo_part.strip_suffix("-GGUF").or_else(|| repo_part.strip_suffix("_GGUF")).unwrap_or(repo_part);
         let (q4_sz, q8_sz, rec) = estimate_model_quant_sizes(&repo_id);
         (
-            format!("{}-Q4_K_M.gguf", repo_part),
-            format!("{}-Q8_0.gguf", repo_part),
+            format!("{}-Q4_K_M.gguf", clean_repo_part),
+            format!("{}-Q8_0.gguf", clean_repo_part),
             q4_sz,
             q8_sz,
             rec,
         )
     };
 
-    let q4_downloaded = if is_llama {
-        state.models_dir.join("model-Q4_K_M.gguf").exists()
-            || state.models_dir.join("Llama-3.2-3B-Instruct-Q4_K_M.gguf").exists()
-    } else {
-        state.models_dir.join(&q4_filename).exists()
-    };
-    let q8_downloaded = if is_llama {
-        state.models_dir.join("model-Q8_0.gguf").exists()
-    } else {
-        state.models_dir.join(&q8_filename).exists()
-    };
+    let scanned = scan_local_gguf_files(&state).await;
 
-    let q4_label = if is_recommended {
+    let mut q4_filename = q4_default_filename;
+    let mut q4_size = q4_default_size;
+    let mut q4_downloaded = false;
+
+    let mut q8_filename = q8_default_filename;
+    let mut q8_size = q8_default_size;
+    let mut q8_downloaded = false;
+
+    let mut other_downloaded_variants = Vec::new();
+
+    for f in &scanned {
+        let matches_this_repo = file_matches_repo_and_quant(&f.filename, &repo_id, &f.quant)
+            || f.repo_id.eq_ignore_ascii_case(&repo_id)
+            || f.filename.eq_ignore_ascii_case(&q4_filename)
+            || f.filename.eq_ignore_ascii_case(&q8_filename);
+
+        if matches_this_repo {
+            if f.quant == "Q4_K_M" || f.filename.contains("Q4_K_M") {
+                q4_downloaded = true;
+                q4_filename = f.filename.clone();
+                q4_size = f.size_bytes;
+            } else if f.quant == "Q8_0" || f.filename.contains("Q8_0") {
+                q8_downloaded = true;
+                q8_filename = f.filename.clone();
+                q8_size = f.size_bytes;
+            } else {
+                other_downloaded_variants.push(serde_json::json!({
+                    "filename": f.filename,
+                    "quant": f.quant,
+                    "display_label": format!("{} (Downloaded)", f.quant),
+                    "size_bytes": f.size_bytes,
+                    "download_size_bytes": f.size_bytes,
+                    "downloaded": true,
+                    "shard_count": 1
+                }));
+            }
+        }
+    }
+
+    if !q4_downloaded {
+        if state.models_dir.join(&q4_filename).exists() {
+            q4_downloaded = true;
+            if let Ok(m) = std::fs::metadata(state.models_dir.join(&q4_filename)) {
+                q4_size = m.len();
+            }
+        }
+    }
+    if !q8_downloaded {
+        if state.models_dir.join(&q8_filename).exists() {
+            q8_downloaded = true;
+            if let Ok(m) = std::fs::metadata(state.models_dir.join(&q8_filename)) {
+                q8_size = m.len();
+            }
+        }
+    }
+
+    let q4_label = if q4_downloaded {
+        "Q4_K_M (Downloaded)".to_string()
+    } else if is_recommended {
         "Q4_K_M (Recommended)".to_string()
     } else {
         "Q4_K_M".to_string()
     };
 
+    let q8_label = if q8_downloaded {
+        "Q8_0 (Downloaded)".to_string()
+    } else {
+        "Q8_0".to_string()
+    };
+
+    let mut variants = vec![
+        serde_json::json!({
+            "filename": q4_filename,
+            "quant": "Q4_K_M",
+            "display_label": q4_label,
+            "size_bytes": q4_size,
+            "download_size_bytes": q4_size,
+            "downloaded": q4_downloaded
+        }),
+        serde_json::json!({
+            "filename": q8_filename,
+            "quant": "Q8_0",
+            "display_label": q8_label,
+            "size_bytes": q8_size,
+            "download_size_bytes": q8_size,
+            "downloaded": q8_downloaded
+        }),
+    ];
+
+    variants.extend(other_downloaded_variants);
+
+    let default_variant = if q4_downloaded {
+        "Q4_K_M".to_string()
+    } else if let Some(first_other) = variants.iter().find(|v| v["downloaded"].as_bool() == Some(true)) {
+        first_other["quant"].as_str().unwrap_or("Q4_K_M").to_string()
+    } else {
+        "Q4_K_M".to_string()
+    };
+
+    let resolved_locally = q4_downloaded || q8_downloaded || variants.iter().any(|v| v["downloaded"].as_bool() == Some(true));
+
     Json(serde_json::json!({
         "repo_id": repo_id,
         "has_vision": false,
-        "default_variant": "Q4_K_M",
-        "variants": [
-            {
-                "filename": q4_filename,
-                "quant": "Q4_K_M",
-                "display_label": q4_label,
-                "size_bytes": q4_size,
-                "download_size_bytes": q4_size,
-                "downloaded": q4_downloaded
-            },
-            {
-                "filename": q8_filename,
-                "quant": "Q8_0",
-                "display_label": "Q8_0",
-                "size_bytes": q8_size,
-                "download_size_bytes": q8_size,
-                "downloaded": q8_downloaded
-            }
-        ]
+        "default_variant": default_variant,
+        "context_length": 131072,
+        "resolved_locally": resolved_locally,
+        "variants": variants
     }))
 }
 

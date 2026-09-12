@@ -10,7 +10,12 @@ use std::time::Duration;
 async fn spawn_test_server() -> (String, Arc<AppState>) {
     let vk_ctx = VulkanContext::init(true).ok();
     let static_dir = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/frontend/dist");
-    let models_dir = PathBuf::from("models");
+    let repo_models = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/models");
+    let models_dir = if repo_models.exists() {
+        repo_models
+    } else {
+        PathBuf::from("models")
+    };
 
     let state = Arc::new(AppState::new(vk_ctx, models_dir, Some(static_dir.clone())));
     let app = create_router(Arc::clone(&state), Some(static_dir));
@@ -745,8 +750,9 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["cached"].as_array().map(|a| a.len()), Some(0));
-    assert_eq!(body["total_size_bytes"].as_u64(), Some(0));
+    let cached_models = body["cached"].as_array().unwrap();
+    assert!(!cached_models.is_empty());
+    assert!(body["total_size_bytes"].as_u64().unwrap() > 0);
 
     // 2. GET /api/hub/cached-gguf
     let resp = client
@@ -756,8 +762,18 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["cached"].as_array().map(|a| a.len()), Some(0));
-    assert_eq!(body["total_size_bytes"].as_u64(), Some(0));
+    let cached = body["cached"].as_array().unwrap();
+    assert!(!cached.is_empty());
+    assert!(body["total_size_bytes"].as_u64().unwrap() > 0);
+    let c0 = &cached[0];
+    assert!(c0["repo_id"].as_str().is_some());
+    assert!(c0["load_id"].as_str().is_some());
+    assert_eq!(c0["model_format"].as_str(), Some("gguf"));
+    assert_eq!(c0["runtime"].as_str(), Some("llama_cpp"));
+    assert_eq!(c0["partial"].as_bool(), Some(false));
+    assert!(c0["capabilities"]["can_chat"].as_bool().unwrap());
+    assert!(c0["capabilities"]["can_train"].as_bool().unwrap());
+    assert!(!c0["capabilities"]["can_download"].as_bool().unwrap());
 
     // 3. GET /api/hub/local
     let resp = client
@@ -767,8 +783,18 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["models"].as_array().map(|a| a.len()), Some(0));
-    assert_eq!(body["count"].as_u64(), Some(0));
+    let models = body["models"].as_array().unwrap();
+    assert!(!models.is_empty());
+    assert_eq!(body["count"].as_u64().unwrap(), models.len() as u64);
+    assert!(body["models_dir"].as_str().unwrap().ends_with("models"));
+    let m0 = &models[0];
+    assert!(m0["id"].as_str().is_some());
+    assert!(m0["display_name"].as_str().is_some());
+    assert!(m0["path"].as_str().unwrap().starts_with("models/"));
+    assert_eq!(m0["model_format"].as_str(), Some("gguf"));
+    assert_eq!(m0["runtime"].as_str(), Some("llama_cpp"));
+    assert_eq!(m0["source"].as_str(), Some("models_dir"));
+    assert!(m0["capabilities"]["can_chat"].as_bool().unwrap());
 
     // 4. GET /api/hub/hidden-models
     let resp = client
@@ -790,16 +816,58 @@ async fn test_hub_inventory_and_variants() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["downloads"].as_array().map(|a| a.len()), Some(0));
 
-    // 6. GET /api/hub/gguf-variants
-    let repo_id = "unsloth/Llama-3.2-3B-Instruct-GGUF";
+    // 6. GET /api/hub/gguf-variants for local file directly by filename
+    let local_file = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
     let resp = client
-        .get(format!("{base_url}/api/hub/gguf-variants?repo_id={repo_id}"))
+        .get(format!("{base_url}/api/hub/gguf-variants?repo_id={local_file}"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["repo_id"].as_str(), Some(repo_id));
+    assert_eq!(body["resolved_locally"].as_bool(), Some(true));
+    assert_eq!(body["context_length"].as_u64(), Some(131072));
+    assert_eq!(body["default_variant"].as_str(), Some("Q4_K_M"));
+    let local_vars = body["variants"].as_array().unwrap();
+    assert_eq!(local_vars.len(), 1);
+    assert_eq!(local_vars[0]["downloaded"].as_bool(), Some(true));
+    assert_eq!(local_vars[0]["quant"].as_str(), Some("Q4_K_M"));
+    assert_eq!(local_vars[0]["filename"].as_str(), Some("Llama-3.2-1B-Instruct-Q4_K_M.gguf"));
+
+    // 7. GET /api/hub/gguf-variants with local_path query param
+    let resp = client
+        .get(format!("{base_url}/api/hub/gguf-variants?local_path=models/{local_file}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["resolved_locally"].as_bool(), Some(true));
+    assert_eq!(body["variants"][0]["downloaded"].as_bool(), Some(true));
+
+    // 8. GET /api/hub/gguf-variants for repo unsloth/Llama-3.2-1B-Instruct-GGUF (detects local Q4_K_M)
+    let repo_1b = "unsloth/Llama-3.2-1B-Instruct-GGUF";
+    let resp = client
+        .get(format!("{base_url}/api/hub/gguf-variants?repo_id={repo_1b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let vars_1b = body["variants"].as_array().unwrap();
+    let q4_1b = vars_1b.iter().find(|v| v["quant"].as_str() == Some("Q4_K_M")).unwrap();
+    assert_eq!(q4_1b["downloaded"].as_bool(), Some(true));
+
+    // 9. GET /api/hub/gguf-variants for repo unsloth/Llama-3.2-3B-Instruct-GGUF (not downloaded)
+    let repo_3b = "unsloth/Llama-3.2-3B-Instruct-GGUF";
+    let resp = client
+        .get(format!("{base_url}/api/hub/gguf-variants?repo_id={repo_3b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["repo_id"].as_str(), Some(repo_3b));
     assert_eq!(body["has_vision"].as_bool(), Some(false));
     assert_eq!(body["default_variant"].as_str(), Some("Q4_K_M"));
     let variants = body["variants"].as_array().unwrap();
@@ -808,6 +876,38 @@ async fn test_hub_inventory_and_variants() {
     assert_eq!(q4["quant"].as_str(), Some("Q4_K_M"));
     assert_eq!(q4["display_label"].as_str(), Some("Q4_K_M (Recommended)"));
     assert!(q4["size_bytes"].as_u64().unwrap() > 1_500_000_000);
+
+    // 10. POST /api/inference/load with filename, model id, and repo id
+    let resp = client
+        .post(format!("{base_url}/api/inference/load"))
+        .json(&serde_json::json!({ "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let load_res: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(load_res["status"].as_str(), Some("ok"));
+    assert_eq!(load_res["model"].as_str(), Some("Llama-3.2-1B-Instruct-Q4_K_M.gguf"));
+
+    let resp = client
+        .post(format!("{base_url}/api/inference/load"))
+        .json(&serde_json::json!({ "model": "llama-3.2-1b-instruct-q4_k_m" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let load_res: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(load_res["status"].as_str(), Some("ok"));
+
+    let resp = client
+        .post(format!("{base_url}/api/inference/load"))
+        .json(&serde_json::json!({ "repo_id": "unsloth/Llama-3.2-1B-Instruct-GGUF" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let load_res: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(load_res["status"].as_str(), Some("ok"));
 }
 
 #[tokio::test]

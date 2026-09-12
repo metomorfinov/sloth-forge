@@ -7,9 +7,13 @@ pub use wrapper::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_vulkan_init_and_vram() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = VulkanContext::init(true).expect("Vulkan init should succeed");
         assert!(!ctx.device_name().is_empty());
         println!("Device: {}", ctx.device_name());
@@ -21,6 +25,7 @@ mod tests {
 
     #[test]
     fn test_buffer_allocation_and_transfer() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = VulkanContext::init(true).unwrap();
         let buf = ctx.alloc_buffer(1024 * 4, false).expect("Alloc buffer");
         assert_eq!(buf.size(), 4096);
@@ -34,6 +39,7 @@ mod tests {
 
     #[test]
     fn test_gemm_forward() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = VulkanContext::init(true).unwrap();
         let m = 2u32;
         let k = 3u32;
@@ -65,6 +71,7 @@ mod tests {
 
     #[test]
     fn test_lora_forward_backward_adamw() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = VulkanContext::init(true).unwrap();
         let batch = 1u32;
         let seq = 2u32;

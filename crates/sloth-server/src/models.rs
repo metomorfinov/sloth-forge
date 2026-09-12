@@ -160,52 +160,48 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelCard> {
                             let id = filename.trim_end_matches(".gguf").to_lowercase();
                             let name = filename.trim_end_matches(".gguf").to_string();
 
-                            discovered.push(ModelCard::new(
-                                id,
-                                name,
-                                filename.clone(),
-                                path.to_string_lossy().to_string(),
-                                size_bytes,
-                                if size_bytes > 3_000_000_000 {
-                                    "7B".to_string()
-                                } else if size_bytes > 1_500_000_000 {
-                                    "3.2B".to_string()
-                                } else {
-                                    "1.5B".to_string()
-                                },
-                                if filename.contains("Q4_K") {
-                                    "Q4_K_M".to_string()
-                                } else if filename.contains("Q8_0") {
-                                    "Q8_0".to_string()
-                                } else {
-                                    "Q4_0".to_string()
-                                },
-                                ctx_len,
-                                arch,
-                                true,
-                                if size_bytes > 3_000_000_000 {
-                                    3800
-                                } else {
-                                    2600
-                                },
-                            ));
-                        } else {
-                            // Fallback file info if GGUF parse failed
-                            let id = filename.trim_end_matches(".gguf").to_lowercase();
-                            discovered.push(ModelCard::new(
-                                id,
-                                filename.trim_end_matches(".gguf").to_string(),
-                                filename.clone(),
-                                path.to_string_lossy().to_string(),
-                                size_bytes,
-                                "Unknown".to_string(),
-                                "Q4_K_M".to_string(),
-                                8192,
-                                "llama".to_string(),
-                                true,
-                                2600,
-                            ));
-                        }
+                                let quant = crate::hub::extract_quant_from_path(&filename);
+                                discovered.push(ModelCard::new(
+                                    id,
+                                    name,
+                                    filename.clone(),
+                                    path.to_string_lossy().to_string(),
+                                    size_bytes,
+                                    if size_bytes > 3_000_000_000 {
+                                        "7B".to_string()
+                                    } else if size_bytes > 1_500_000_000 {
+                                        "3.2B".to_string()
+                                    } else {
+                                        "1.5B".to_string()
+                                    },
+                                    quant,
+                                    ctx_len,
+                                    arch,
+                                    true,
+                                    if size_bytes > 3_000_000_000 {
+                                        3800
+                                    } else {
+                                        2600
+                                    },
+                                ));
+                            } else {
+                                // Fallback file info if GGUF parse failed
+                                let id = filename.trim_end_matches(".gguf").to_lowercase();
+                                let quant = crate::hub::extract_quant_from_path(&filename);
+                                discovered.push(ModelCard::new(
+                                    id,
+                                    filename.trim_end_matches(".gguf").to_string(),
+                                    filename.clone(),
+                                    path.to_string_lossy().to_string(),
+                                    size_bytes,
+                                    "Unknown".to_string(),
+                                    quant,
+                                    131072,
+                                    "llama".to_string(),
+                                    true,
+                                    2600,
+                                ));
+                            }
                     }
                 }
             }
