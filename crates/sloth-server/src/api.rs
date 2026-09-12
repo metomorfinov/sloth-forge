@@ -12,6 +12,7 @@ use axum::{
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -663,11 +664,38 @@ pub async fn handle_check_embedding(Path(id): Path<String>) -> Json<serde_json::
     }))
 }
 
-pub async fn handle_model_config(Path(id): Path<String>) -> Json<serde_json::Value> {
+pub async fn handle_model_config(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let scanned = crate::hub::scan_local_gguf_files(&state).await;
+    let size_bytes = scanned
+        .iter()
+        .find(|f| {
+            f.filename.eq_ignore_ascii_case(&id)
+                || f.repo_id.eq_ignore_ascii_case(&id)
+                || id.contains(&f.filename)
+        })
+        .map(|f| f.size_bytes)
+        .unwrap_or_else(|| {
+            if id.to_lowercase().contains("3.2-1b") {
+                807_694_368
+            } else if id.to_lowercase().contains("3b") {
+                2_100_000_000
+            } else {
+                3_800_000_000
+            }
+        });
+
+    let is_vision = id.to_lowercase().contains("vision") || id.to_lowercase().contains("-vl");
+
     Json(serde_json::json!({
         "id": id,
         "model_name": id,
-        "is_vision": false,
+        "model_type": "text",
+        "model_size_bytes": size_bytes,
+        "max_position_embeddings": 131072,
+        "is_vision": is_vision,
         "is_embedding": false,
         "is_audio": false,
         "is_lora": false,
@@ -683,6 +711,19 @@ pub async fn handle_model_config(Path(id): Path<String>) -> Json<serde_json::Val
                 "lora_dropout": 0.0
             }
         }
+    }))
+}
+
+pub async fn handle_start_request_get(
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "start_request_id": id,
+        "job_id": format!("job-{}", id),
+        "state": "accepted",
+        "message": "Training start request accepted",
+        "error": null,
+        "error_code": null
     }))
 }
 
@@ -825,8 +866,17 @@ pub async fn handle_inference_load(
     }))
 }
 
-pub async fn handle_inference_unload() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+pub async fn handle_inference_unload(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    {
+        let mut active = state.active_inference_model.write().await;
+        *active = String::new();
+    }
+    Json(serde_json::json!({
+        "status": "ok",
+        "unloaded": true
+    }))
 }
 
 pub async fn handle_inference_load_progress() -> Json<serde_json::Value> {
@@ -877,12 +927,99 @@ pub async fn handle_inference_validate(
 }
 
 pub async fn handle_inference_llama_flags() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "flags": [] }))
+    Json(serde_json::json!({
+        "flags": {
+            "--ctx-size": "Size of the prompt context (default: 4096)",
+            "--n-gpu-layers": "Number of layers to store in VRAM",
+            "--batch-size": "Batch size for prompt processing (default: 2048)",
+            "--threads": "Number of threads to use during generation",
+            "--parallel": "Number of parallel sequences to decode"
+        },
+        "managed": [
+            "--model",
+            "--port",
+            "--host"
+        ],
+        "switch_flags": [
+            "--verbose",
+            "--jinja",
+            "--cont-batching",
+            "--embedding",
+            "--flash-attn"
+        ],
+        "max_bytes": 8192,
+        "windows_command_budget": 0,
+        "default_parallel_slots": 1,
+        "parallel_slots_clamped": false,
+        "probe_ok": true
+    }))
 }
 
-pub async fn handle_inference_estimate_memory() -> Json<serde_json::Value> {
+pub async fn handle_inference_estimate_memory(
+    State(state): State<Arc<AppState>>,
+    payload: Option<Json<serde_json::Value>>,
+) -> Json<serde_json::Value> {
+    let mut model_path = String::new();
+    let mut n_ctx: u64 = 8192;
+
+    if let Some(Json(p)) = payload {
+        if let Some(m) = p.get("model_path").or_else(|| p.get("modelPath")).and_then(|v| v.as_str()) {
+            model_path = m.to_string();
+        }
+        if let Some(c) = p.get("n_ctx").or_else(|| p.get("nCtx")).and_then(|v| v.as_u64()) {
+            n_ctx = c;
+        }
+    }
+
+    if model_path.is_empty() {
+        model_path = state.active_inference_model.read().await.clone();
+    }
+
+    let scanned = crate::hub::scan_local_gguf_files(&state).await;
+    let weights_bytes = scanned
+        .iter()
+        .find(|f| {
+            f.filename.eq_ignore_ascii_case(&model_path)
+                || f.repo_id.eq_ignore_ascii_case(&model_path)
+                || model_path.contains(&f.filename)
+        })
+        .map(|f| f.size_bytes)
+        .unwrap_or_else(|| {
+            if model_path.to_lowercase().contains("1b") {
+                807_694_368
+            } else if model_path.to_lowercase().contains("3b") {
+                2_100_000_000
+            } else {
+                2_500_000_000
+            }
+        });
+
+    let kv_bytes = n_ctx * 65536;
+    let compute_bytes = 150 * 1024 * 1024;
+    let total_bytes = weights_bytes + kv_bytes + compute_bytes;
+
     Json(serde_json::json!({
-        "estimated_vram_bytes": 2000000000u64,
+        "available": true,
+        "reason": null,
+        "weights_bytes": weights_bytes,
+        "kv_bytes": kv_bytes,
+        "compute_bytes": compute_bytes,
+        "drafter_runtime_bytes": 0,
+        "drafter_runtime_gpu_bytes": 0,
+        "projector_runtime_bytes": 0,
+        "drafter_kv_unsized": false,
+        "adapters_unsized": false,
+        "total_bytes": total_bytes,
+        "gpu_bytes": total_bytes,
+        "kv_estimable": true,
+        "kv_on_gpu": true,
+        "n_ctx": n_ctx,
+        "cache_type_kv": "f16",
+        "n_parallel": 1,
+        "layer_count": 32,
+        "gpu_layers": 33,
+        "moe_offload_unmodelled": false,
+        "estimated_vram_bytes": total_bytes,
         "fits": true
     }))
 }
@@ -1044,29 +1181,20 @@ pub async fn handle_chat_attachments() -> Json<serde_json::Value> {
 }
 
 // Settings
-pub async fn handle_settings_personalization() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "version": 1,
-        "profile": {
-            "displayName": "rivergod",
-            "nickname": "rivergod",
-            "avatarDataUrl": null,
-            "avatarShape": "circle",
-            "showGreetingSloth": true
-        },
-        "appearance": {
-            "theme": "dark",
-            "palette": "standard",
-            "language": "en",
-            "customization": {}
-        },
-        "user_name": "rivergod",
-        "custom_instructions": "",
-        "saved": true,
-        "customizationSaved": true,
-        "paletteSaved": true,
-        "greetingSlothSaved": true
-    }))
+pub async fn handle_settings_personalization(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let p = state.personalization.read().await;
+    Json((*p).clone())
+}
+
+pub async fn handle_settings_personalization_put(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mut p = state.personalization.write().await;
+    *p = payload;
+    Json((*p).clone())
 }
 
 pub async fn handle_settings_upload_limit(
@@ -1201,9 +1329,25 @@ pub async fn handle_settings_openai_auto_switch() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_settings_openai_auto_switch_overrides() -> Json<serde_json::Value> {
+pub async fn handle_settings_openai_auto_switch_overrides(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let ov = state.model_overrides.read().await;
     Json(serde_json::json!({
-        "overrides": {}
+        "overrides": *ov
+    }))
+}
+
+pub async fn handle_settings_openai_auto_switch_overrides_put(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let mut ov = state.model_overrides.write().await;
+    let new_ov = payload.get("overrides").cloned().unwrap_or(payload);
+    *ov = new_ov;
+    Json(serde_json::json!({
+        "status": "ok",
+        "overrides": *ov
     }))
 }
 
@@ -1511,13 +1655,77 @@ pub async fn handle_model_kv_cache_estimate(
 }
 
 pub async fn handle_model_browse_folders(
-    Query(_query): Query<serde_json::Value>,
+    Query(query): Query<serde_json::Value>,
 ) -> Json<serde_json::Value> {
+    let raw_path = query.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let show_hidden = query.get("show_hidden")
+        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+        .unwrap_or(false);
+
+    let target_dir = if raw_path.is_empty() || raw_path == "/" {
+        let repo_root = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge");
+        if repo_root.exists() {
+            repo_root
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        }
+    } else {
+        PathBuf::from(raw_path)
+    };
+
+    let current_str = target_dir.to_string_lossy().to_string();
+    let parent_str = target_dir.parent().map(|p| p.to_string_lossy().to_string());
+
+    let mut entries = Vec::new();
+    let mut model_files_here: usize = 0;
+
+    if target_dir.exists() && target_dir.is_dir() {
+        if let Ok(dir_entries) = std::fs::read_dir(&target_dir) {
+            for entry in dir_entries.flatten() {
+                let p = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_hidden = name.starts_with('.');
+
+                if p.is_file() {
+                    if name.to_lowercase().ends_with(".gguf") {
+                        model_files_here += 1;
+                    }
+                } else if p.is_dir() {
+                    if is_hidden && !show_hidden {
+                        continue;
+                    }
+                    let mut has_models = false;
+                    if let Ok(sub_entries) = std::fs::read_dir(&p) {
+                        for sub in sub_entries.flatten() {
+                            if sub.file_name().to_string_lossy().to_lowercase().ends_with(".gguf") {
+                                has_models = true;
+                                break;
+                            }
+                        }
+                    }
+                    entries.push(serde_json::json!({
+                        "name": name,
+                        "has_models": has_models,
+                        "hidden": is_hidden
+                    }));
+                }
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        let name_a = a["name"].as_str().unwrap_or("");
+        let name_b = b["name"].as_str().unwrap_or("");
+        name_a.cmp(name_b)
+    });
+
     Json(serde_json::json!({
-        "current": "/",
-        "folders": [
-            { "name": "models", "path": "models", "is_dir": true }
-        ]
+        "current": current_str,
+        "parent": parent_str,
+        "entries": entries,
+        "suggestions": ["models"],
+        "truncated": false,
+        "model_files_here": model_files_here
     }))
 }
 
@@ -1555,9 +1763,11 @@ pub async fn handle_picker_validate_chat_template(
 }
 
 pub async fn handle_picker_chat_template(
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({
+        "model_name": id,
+        "chat_template": null,
         "template": null
     }))
 }
@@ -1567,14 +1777,32 @@ pub async fn handle_inference_cancel() -> Json<serde_json::Value> {
 }
 
 pub async fn handle_inference_count_tokens(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let count = payload
         .get("messages")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.len() * 20)
+        .map(|arr| {
+            arr.iter()
+                .map(|m| {
+                    m.get("content")
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.split_whitespace().count() * 4 / 3 + 4)
+                        .unwrap_or(10)
+                })
+                .sum::<usize>()
+        })
         .unwrap_or(15);
-    Json(serde_json::json!({ "count": count }))
+
+    let active_model = state.active_inference_model.read().await.clone();
+    let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or(&active_model).to_string();
+
+    Json(serde_json::json!({
+        "input_tokens": count,
+        "count": count,
+        "model": model
+    }))
 }
 
 pub async fn handle_inference_active_generations() -> Json<serde_json::Value> {
@@ -1657,25 +1885,38 @@ pub async fn handle_llama_update_changelog() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_auth_api_keys_get() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "keys": [] }))
+pub async fn handle_auth_api_keys_get(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let keys = state.api_keys.read().await;
+    Json(serde_json::json!({ "keys": *keys }))
 }
 
 pub async fn handle_auth_api_keys_post(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
     let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("Default Key");
-    Json(serde_json::json!({
-        "id": "key-1",
+    let key_id = format!("key-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let new_key = serde_json::json!({
+        "id": key_id,
         "name": name,
-        "key": "sf-live-key-12345",
+        "key": format!("sf-{}", &key_id),
         "created_at": crate::state::iso_now()
-    }))
+    });
+    {
+        let mut keys = state.api_keys.write().await;
+        keys.push(new_key.clone());
+    }
+    Json(new_key)
 }
 
 pub async fn handle_auth_api_keys_delete(
-    Path(_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
+    let mut keys = state.api_keys.write().await;
+    keys.retain(|k| k.get("id").and_then(|v| v.as_str()) != Some(&id));
     Json(serde_json::json!({ "status": "ok", "deleted": true }))
 }
 

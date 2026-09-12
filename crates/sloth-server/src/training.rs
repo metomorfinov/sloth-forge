@@ -435,7 +435,7 @@ pub async fn start_training(
         job_id_camel: job_id,
         session_id: session_id.clone(),
         session_id_camel: session_id,
-        status: "started".to_string(),
+        status: "queued".to_string(),
         total_steps: params.total_steps,
         total_steps_camel: params.total_steps,
         mode: params.mode_name,

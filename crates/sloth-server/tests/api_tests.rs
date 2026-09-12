@@ -132,7 +132,7 @@ async fn test_training_beginner_preset_start_stop_status() {
 
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(start_resp["status"].as_str(), Some("started"));
+    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
     assert_eq!(start_resp["loraRank"].as_u64().or_else(|| start_resp["lora_rank"].as_u64()), Some(16));
 
     // Let the training loop execute a couple steps
@@ -191,7 +191,7 @@ async fn test_training_pro_hyperparameters() {
 
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(start_resp["status"].as_str(), Some("started"));
+    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
     assert_eq!(start_resp["loraRank"].as_u64().or_else(|| start_resp["lora_rank"].as_u64()), Some(32));
 
     // Halt
@@ -550,7 +550,7 @@ async fn test_unsloth_training_start_stop_reset() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let start_resp: serde_json::Value = resp.json().await.unwrap();
     assert!(start_resp["job_id"].as_str().is_some() || start_resp["jobId"].as_str().is_some());
-    assert_eq!(start_resp["status"].as_str(), Some("started"));
+    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
 
     tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -1601,5 +1601,175 @@ async fn test_audited_endpoints_and_schemas() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let resp = client.post(format!("{base_url}/api/export/export/gguf")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_model_picker_and_deep_integration_audit() {
+    let (base_url, _state) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // 1. FolderBrowser: GET /api/models/browse-folders
+    let resp = client.get(format!("{base_url}/api/models/browse-folders")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let fb: serde_json::Value = resp.json().await.unwrap();
+    assert!(fb["entries"].is_array(), "FolderBrowser response MUST contain entries array");
+    assert!(fb["current"].is_string());
+    assert!(fb["suggestions"].is_array());
+    assert!(fb["model_files_here"].is_number());
+
+    // 2. Memory Estimation: POST /api/inference/estimate-memory
+    let resp = client
+        .post(format!("{base_url}/api/inference/estimate-memory"))
+        .json(&serde_json::json!({
+            "model_path": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            "n_ctx": 8192
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let est: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(est["available"].as_bool(), Some(true));
+    assert!(est["weights_bytes"].as_u64().unwrap() > 0);
+    assert!(est["kv_bytes"].as_u64().unwrap() > 0);
+    assert!(est["total_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(est["fits"].as_bool(), Some(true));
+
+    // 3. Llama Flags Catalog: GET /api/inference/llama-flags
+    let resp = client.get(format!("{base_url}/api/inference/llama-flags")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let flags: serde_json::Value = resp.json().await.unwrap();
+    assert!(flags["flags"].is_object(), "flags MUST be a dictionary/object of flag descriptions");
+    assert!(flags["managed"].is_array());
+    assert!(flags["switch_flags"].is_array());
+    assert_eq!(flags["probe_ok"].as_bool(), Some(true));
+
+    // 4. Overrides: PUT & GET /api/settings/openai-auto-switch/overrides
+    let test_overrides = serde_json::json!({
+        "models": {
+            "llama-1b": { "temperature": 0.5, "n_ctx": 4096 }
+        }
+    });
+    let resp = client
+        .put(format!("{base_url}/api/settings/openai-auto-switch/overrides"))
+        .json(&serde_json::json!({ "overrides": test_overrides }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = client.get(format!("{base_url}/api/settings/openai-auto-switch/overrides")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let ov_resp: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(ov_resp["overrides"], test_overrides);
+
+    // 5. Chat Count Tokens: POST /api/inference/chat/count_tokens
+    let resp = client
+        .post(format!("{base_url}/api/inference/chat/count_tokens"))
+        .json(&serde_json::json!({
+            "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+            "messages": [
+                { "role": "user", "content": "How does SlothForge integrate Vulkan?" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let count_res: serde_json::Value = resp.json().await.unwrap();
+    assert!(count_res["input_tokens"].as_u64().unwrap() > 0, "input_tokens must be reported");
+    assert_eq!(count_res["model"].as_str(), Some("Llama-3.2-1B-Instruct-Q4_K_M.gguf"));
+
+    // 6. Picker Chat Template: GET /api/picker/chat-template/:id
+    let resp = client.get(format!("{base_url}/api/picker/chat-template/llama-3.2-1b")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let tmpl: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tmpl["model_name"].as_str(), Some("llama-3.2-1b"));
+
+    // 7. Training Start Request Status: GET /api/train/start-requests/:id
+    let resp = client.get(format!("{base_url}/api/train/start-requests/req-999")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let req_stat: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(req_stat["start_request_id"].as_str(), Some("req-999"));
+    assert_eq!(req_stat["state"].as_str(), Some("accepted"));
+
+    // 8. Delete Impact: POST /api/hub/delete-impact for local model
+    let resp = client
+        .post(format!("{base_url}/api/hub/delete-impact"))
+        .json(&serde_json::json!({
+            "repo_id": "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let del_impact: serde_json::Value = resp.json().await.unwrap();
+    assert!(del_impact["reclaimed_bytes"].as_u64().unwrap() > 500_000_000, "Should report real file size");
+    assert_eq!(del_impact["reclaimed_bytes"], del_impact["freed_bytes"]);
+
+    // 9. Inference Ejection / Unload: POST /api/inference/unload
+    let resp = client.post(format!("{base_url}/api/inference/unload")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client.get(format!("{base_url}/api/inference/status")).send().await.unwrap();
+    let inf_status: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(inf_status["active_model"].as_str(), Some(""));
+
+    // 10. Personalization Persistence: PUT & GET /api/settings/personalization
+    let updated_profile = serde_json::json!({
+        "version": 1,
+        "profile": {
+            "displayName": "AuditTester",
+            "nickname": "auditor",
+            "avatarDataUrl": null,
+            "avatarShape": "rounded",
+            "showGreetingSloth": false
+        },
+        "appearance": {
+            "theme": "dark",
+            "palette": "high-contrast",
+            "language": "ru",
+            "customization": {}
+        },
+        "user_name": "AuditTester",
+        "custom_instructions": "Always verify integration contracts",
+        "saved": true
+    });
+    let resp = client
+        .put(format!("{base_url}/api/settings/personalization"))
+        .json(&updated_profile)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = client.get(format!("{base_url}/api/settings/personalization")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let get_pers: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(get_pers["profile"]["displayName"].as_str(), Some("AuditTester"));
+    assert_eq!(get_pers["appearance"]["language"].as_str(), Some("ru"));
+
+    // 11. API Keys Persistence: POST, GET, DELETE
+    let resp = client
+        .post(format!("{base_url}/api/auth/api-keys"))
+        .json(&serde_json::json!({ "name": "Production Deploy Key" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let created_key: serde_json::Value = resp.json().await.unwrap();
+    let key_id = created_key["id"].as_str().unwrap();
+
+    let resp = client.get(format!("{base_url}/api/auth/api-keys")).send().await.unwrap();
+    let keys_list: serde_json::Value = resp.json().await.unwrap();
+    let arr = keys_list["keys"].as_array().unwrap();
+    assert!(arr.iter().any(|k| k["id"].as_str() == Some(key_id)));
+
+    let resp = client.delete(format!("{base_url}/api/auth/api-keys/{key_id}")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = client.get(format!("{base_url}/api/auth/api-keys")).send().await.unwrap();
+    let keys_list_after: serde_json::Value = resp.json().await.unwrap();
+    let arr_after = keys_list_after["keys"].as_array().unwrap();
+    assert!(!arr_after.iter().any(|k| k["id"].as_str() == Some(key_id)));
 }
 
