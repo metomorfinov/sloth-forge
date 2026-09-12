@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Адрес по умолчанию: только этот компьютер.
@@ -21,47 +20,47 @@ async fn main() -> anyhow::Result<()> {
     let host = std::env::var("SLOTH_HOST")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| DEFAULT_HOST.to_string());
-    let explicit_port: Option<u16> = std::env::var("PORT")
-        .or_else(|_| std::env::var("SLOTH_PORT"))
-        .ok()
-        .and_then(|p| p.parse().ok());
 
-    let (listener, bound_addr) = match explicit_port {
-        Some(p) => {
-            let addr: SocketAddr = format!("{}:{}", host, p).parse()?;
-            (tokio::net::TcpListener::bind(addr).await?, addr)
-        }
-        None => {
-            let candidate_ports = [8000, 3000, 8088, 8081];
-            let mut result = None;
-            for p in candidate_ports {
-                let addr: SocketAddr = format!("{}:{}", host, p).parse()?;
-                if let Ok(l) = tokio::net::TcpListener::bind(addr).await {
-                    result = Some((l, addr));
-                    break;
-                }
-            }
-            result.ok_or_else(|| anyhow::anyhow!("Unable to bind to any candidate port (8000, 3000, 8088, 8081)"))?
-        }
+    // Порт: PORT или SLOTH_PORT, иначе 3000. Перебора портов нет: если порт занят,
+    // лучше сразу сказать об этом, чем молча уехать на другой адрес.
+    let port = match std::env::var("PORT").or_else(|_| std::env::var("SLOTH_PORT")) {
+        Ok(raw) => raw
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("Некорректный порт в PORT/SLOTH_PORT: «{raw}»"))?,
+        Err(_) => sloth_server::DEFAULT_PORT,
     };
 
-    // Find static frontend dist dir
-    let static_dir = if let Ok(custom) = std::env::var("STATIC_DIR") {
-        Some(PathBuf::from(custom))
+    // IPv6-адрес в записи «адрес:порт» заключается в квадратные скобки
+    let authority = if host.contains(':') {
+        format!("[{host}]:{port}")
     } else {
-        let candidates = [
-            PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/frontend/dist"),
-            PathBuf::from("frontend/dist"),
-            PathBuf::from("../frontend/dist"),
-            PathBuf::from("../../frontend/dist"),
-        ];
-        candidates.into_iter().find(|p| p.exists())
+        format!("{host}:{port}")
     };
+    let bound_addr: SocketAddr = authority
+        .parse()
+        .map_err(|err| anyhow::anyhow!("Некорректный адрес {authority}: {err}"))?;
+    let listener = tokio::net::TcpListener::bind(bound_addr)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "Не удалось занять {bound_addr}: {err}. Возможно, порт занят другой программой — укажите другой через PORT=<номер>"
+            )
+        })?;
 
-    println!("Starting SlothForge Server v{}...", sloth_server::server_version());
+    let static_dir = sloth_server::locations::find_static_dir();
+
+    println!(
+        "Starting SlothForge Server v{}...",
+        sloth_server::server_version()
+    );
     println!("Listening on http://{}", bound_addr);
-    if let Some(ref dir) = static_dir {
-        println!("Serving static frontend assets from: {}", dir.display());
+    match static_dir {
+        Some(ref dir) => println!("Serving static frontend assets from: {}", dir.display()),
+        None => println!(
+            "Собранный фронтенд не найден: выполните `cd frontend && npm run build` или укажите {}",
+            sloth_server::locations::STATIC_DIR_ENV
+        ),
     }
 
     sloth_server::run_server_with_listener(listener, bound_addr, static_dir).await

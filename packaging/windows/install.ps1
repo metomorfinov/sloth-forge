@@ -52,10 +52,10 @@ try {
 
 Write-Host "=================================================" -ForegroundColor Cyan
 Write-Host "  SlothForge Studio successfully installed!" -ForegroundColor Green
-Write-Host "  Launching server on http://localhost:8000..." -ForegroundColor Cyan
+Write-Host "  Launching server on http://localhost:3000..." -ForegroundColor Cyan
 Write-Host "=================================================" -ForegroundColor Cyan
 
 if (Test-Path "$InstallDir\sloth-server.exe") {
     Start-Process "$InstallDir\sloth-server.exe"
-    Start-Process "http://localhost:8000"
+    Start-Process "http://localhost:3000"
 }

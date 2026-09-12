@@ -166,16 +166,8 @@ pub async fn scan_local_gguf_files(state: &AppState) -> Vec<ScannedGgufFile> {
     let mut dirs_to_scan = Vec::new();
     dirs_to_scan.push(state.models_dir.clone());
 
-    if let Ok(parent_models) = std::path::Path::new("../../models").canonicalize() {
-        if parent_models.exists() && !dirs_to_scan.contains(&parent_models) {
-            dirs_to_scan.push(parent_models);
-        }
-    }
-    if let Ok(parent_models) = std::path::Path::new("../models").canonicalize() {
-        if parent_models.exists() && !dirs_to_scan.contains(&parent_models) {
-            dirs_to_scan.push(parent_models);
-        }
-    }
+    // Папка моделей определяется при запуске (locations.rs), поэтому соседние
+    // ../models относительно текущей папки больше не сканируются
 
     {
         let custom_folders = state.scan_folders.read().await;

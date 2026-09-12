@@ -296,6 +296,8 @@ pub struct AppState {
     pub tx_telemetry: broadcast::Sender<WsTelemetryEnvelope>,
     pub models_dir: PathBuf,
     pub static_dir: Option<PathBuf>,
+    /// Порт, на котором реально слушает сервер (показывается в настройках доступа по сети).
+    pub server_port: std::sync::atomic::AtomicU16,
     pub master_gradients: Arc<RwLock<Vec<f32>>>,
     pub training_mutex: Arc<Mutex<()>>,
     pub download_state: Arc<RwLock<DownloadState>>,
@@ -354,6 +356,7 @@ impl AppState {
             tx_telemetry,
             models_dir,
             static_dir,
+            server_port: std::sync::atomic::AtomicU16::new(crate::DEFAULT_PORT),
             master_gradients,
             training_mutex: Arc::new(Mutex::new(())),
             download_state: Arc::new(RwLock::new(DownloadState::default())),

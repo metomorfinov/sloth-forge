@@ -4,6 +4,7 @@ pub mod cluster;
 pub mod error;
 pub mod handlers;
 pub mod hub;
+pub mod locations;
 pub mod models;
 pub mod paths;
 pub mod security;
@@ -27,6 +28,9 @@ use tracing::{info, warn};
 pub fn server_version() -> &'static str {
     "0.1.0"
 }
+
+/// Порт сервера по умолчанию.
+pub const DEFAULT_PORT: u16 = 3000;
 
 pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Router {
     // Ответы API читаются только страницами с этого компьютера (см. security.rs)
@@ -261,15 +265,24 @@ pub async fn run_server_with_listener(
     addr: SocketAddr,
     static_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let vk_ctx = VulkanContext::init(true).ok();
-    if let Some(ref ctx) = vk_ctx {
-        info!("Initialized Vulkan device: {}", ctx.device_name());
-    } else {
-        warn!("Running in fallback mode without hardware Vulkan context");
-    }
+    // Причину отказа Vulkan логируем, а не теряем: без неё не понять, почему нет GPU
+    let vk_ctx = match VulkanContext::init(true) {
+        Ok(ctx) => {
+            info!("Vulkan-устройство: {}", ctx.device_name());
+            Some(ctx)
+        }
+        Err(err) => {
+            warn!("Vulkan недоступен ({err}), сервер работает без GPU");
+            None
+        }
+    };
 
-    let models_dir = PathBuf::from("models");
+    let models_dir = locations::find_models_dir();
+    info!("Папка моделей: {}", models_dir.display());
     let state = Arc::new(AppState::new(vk_ctx, models_dir, static_dir.clone()));
+    state
+        .server_port
+        .store(addr.port(), std::sync::atomic::Ordering::Relaxed);
 
     let app = create_router(state, static_dir);
 

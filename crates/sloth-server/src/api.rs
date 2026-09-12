@@ -59,7 +59,7 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthRes
         .vk_ctx
         .as_ref()
         .map(|c| c.device_name().to_string())
-        .unwrap_or_else(|| "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string());
+        .unwrap_or_else(|| "Vulkan-устройство не найдено".to_string());
 
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -71,7 +71,7 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthRes
         vram_used_mb,
         cuda_available: false,
         rocm_available: false,
-        vulkan_available: true,
+        vulkan_available: state.vk_ctx.is_some(),
         capabilities: vec![
             "train".to_string(),
             "chat".to_string(),
@@ -1735,14 +1735,16 @@ pub async fn handle_llama_backend() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_settings_lan_access() -> Json<serde_json::Value> {
+pub async fn handle_settings_lan_access(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "state": "off",
         "urls": [],
         "public_urls": [],
         "error": null,
         "auto_start": false,
-        "configured_port": 3000,
+        "configured_port": state.server_port.load(Ordering::Relaxed),
         "active_port": null,
         "managed_by": "settings",
         "can_start": true,
@@ -1758,13 +1760,14 @@ pub async fn handle_settings_lan_access() -> Json<serde_json::Value> {
 }
 
 pub async fn handle_settings_lan_access_action(
+    state: State<Arc<AppState>>,
     Json(_payload): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    handle_settings_lan_access().await
+    handle_settings_lan_access(state).await
 }
 
-pub async fn handle_settings_lan_access_post() -> Json<serde_json::Value> {
-    handle_settings_lan_access().await
+pub async fn handle_settings_lan_access_post(state: State<Arc<AppState>>) -> Json<serde_json::Value> {
+    handle_settings_lan_access(state).await
 }
 
 pub async fn handle_settings_helper_precache() -> Json<serde_json::Value> {
@@ -1787,10 +1790,14 @@ pub async fn handle_settings_helper_precache_put(
 }
 
 pub async fn handle_settings_hugging_face_cache() -> Json<serde_json::Value> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/rivergod".to_string());
-    let cache_dir = format!("{}/.cache/huggingface", home);
-    let hub_dir = format!("{}/hub", cache_dir);
-    let xet_dir = format!("{}/xet", cache_dir);
+    // Как в huggingface_hub: HF_HOME, иначе ~/.cache/huggingface
+    let cache_path = std::env::var_os("HF_HOME")
+        .map(PathBuf::from)
+        .or_else(|| crate::paths::home_dir().map(|home| home.join(".cache").join("huggingface")))
+        .unwrap_or_else(|| PathBuf::from(".cache").join("huggingface"));
+    let hub_dir = cache_path.join("hub").to_string_lossy().to_string();
+    let xet_dir = cache_path.join("xet").to_string_lossy().to_string();
+    let cache_dir = cache_path.to_string_lossy().to_string();
 
     Json(serde_json::json!({
         "cache_home": cache_dir,

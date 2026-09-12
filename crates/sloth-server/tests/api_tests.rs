@@ -9,8 +9,10 @@ use std::time::Duration;
 
 async fn spawn_test_server() -> (String, Arc<AppState>) {
     let vk_ctx = VulkanContext::init(true).ok();
-    let static_dir = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/frontend/dist");
-    let repo_models = PathBuf::from("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/models");
+    // Пути от корня проекта, а не зашитые под одну машину
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let static_dir = project_root.join("frontend/dist");
+    let repo_models = project_root.join("models");
     let models_dir = if repo_models.exists() {
         repo_models
     } else {

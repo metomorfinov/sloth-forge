@@ -32,7 +32,8 @@ std::vector<uint32_t> ComputePipeline::load_spirv(const std::string& name) {
     search_paths.push_back("shaders/" + name + ".spv");
     search_paths.push_back("crates/sloth-vulkan-sys/shaders/" + name + ".spv");
     search_paths.push_back("../shaders/" + name + ".spv");
-    search_paths.push_back("/home/rivergod/.gemini/antigravity/scratch/sloth-forge/crates/sloth-vulkan-sys/shaders/" + name + ".spv");
+    // Абсолютный путь под одну машину убран: на других компьютерах и в CI он не существует.
+    // Путь к шейдерам можно задать через SLOTH_SHADER_DIR, иначе используются встроенные копии.
 
     for (const auto& path : search_paths) {
         std::ifstream file(path, std::ios::ate | std::ios::binary);
