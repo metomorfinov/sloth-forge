@@ -22,6 +22,11 @@ data/raw/
 # IDE & OS
 .vscode/
 .idea/
-.DS_Store
 *.swp
 server.log
+
+# Claude Code local configs
+.claude/
+.mcp.json
+CLAUDE.md
+claude.md
