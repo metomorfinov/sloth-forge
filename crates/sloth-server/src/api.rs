@@ -641,10 +641,10 @@ pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<
         "export_unsupported_message": null,
         "videoSupported": false,
         "video_supported": false,
-        "videoUnsupportedReason": "Vulkan GCN 4.0 does not meet video generation requirements.",
-        "video_unsupported_reason": "Vulkan GCN 4.0 does not meet video generation requirements.",
-        "videoUnsupportedMessage": "Video generation is not supported on this device.",
-        "video_unsupported_message": "Video generation is not supported on this device.",
+        "videoUnsupportedReason": "Генерация видео появится в SlothForge на этапе 7 дорожной карты",
+        "video_unsupported_reason": "Генерация видео появится в SlothForge на этапе 7 дорожной карты",
+        "videoUnsupportedMessage": "Генерация видео пока не поддерживается в SlothForge",
+        "video_unsupported_message": "Генерация видео пока не поддерживается в SlothForge",
         "loaded": true
     });
     Json(resp)
@@ -1074,20 +1074,28 @@ pub async fn handle_inference_estimate_memory(
     }))
 }
 
-pub async fn handle_inference_video_status() -> Json<serde_json::Value> {
+/// Статус «ничего не загружено» в формате фронтенда (DiffusionStatus / VideoStatus).
+/// Раньше `loaded` был массивом, а фронтенд ждёт булево значение.
+fn idle_generation_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "active_model": null,
-        "loading": [],
-        "loaded": []
+        "loaded": false,
+        "repo_id": null,
+        "family": null,
+        "base_repo": null,
+        "device": null,
+        "dtype": null,
+        "model_kind": null,
+        "gguf_variant": null,
+        "cpu_offload": false
     }))
 }
 
+pub async fn handle_inference_video_status() -> Json<serde_json::Value> {
+    idle_generation_status()
+}
+
 pub async fn handle_inference_images_status() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "active_model": null,
-        "loading": [],
-        "loaded": []
-    }))
+    idle_generation_status()
 }
 
 // Models
@@ -1948,33 +1956,35 @@ pub async fn handle_settings_current_date_prompt_put(
     Json(serde_json::json!({ "enabled": enabled }))
 }
 
-pub async fn handle_model_cached_path(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<serde_json::Value>,
-) -> crate::error::ApiResult<Json<serde_json::Value>> {
+/// Находит модель на диске по `repo_id` (и необязательному `variant`) из запроса.
+/// Результат всегда лежит внутри папки моделей или scan-folders.
+async fn resolve_cached_model_path(
+    state: &AppState,
+    params: &serde_json::Value,
+) -> crate::error::ApiResult<PathBuf> {
     use crate::error::ApiError;
 
-    let model_id = query
+    let model_id = params
         .get("model_id")
-        .or_else(|| query.get("repo_id"))
-        .or_else(|| query.get("repoId"))
-        .or_else(|| query.get("model"))
+        .or_else(|| params.get("repo_id"))
+        .or_else(|| params.get("repoId"))
+        .or_else(|| params.get("model"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
     if model_id.is_empty() {
         return Err(ApiError::bad_request("Не указан repo_id"));
     }
-    let variant = query
+    let variant = params
         .get("variant")
-        .or_else(|| query.get("gguf_variant"))
+        .or_else(|| params.get("gguf_variant"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
     // Сначала точное совпадение среди найденных на диске GGUF (тот же repo и квант),
     // затем — путь или имя файла
-    let from_scan = crate::hub::scan_local_gguf_files(&state)
+    let from_scan = crate::hub::scan_local_gguf_files(state)
         .await
         .into_iter()
         .find(|file| {
@@ -1984,15 +1994,21 @@ pub async fn handle_model_cached_path(
         .map(|file| file.path);
     let found = match from_scan {
         Some(path) => Some(path),
-        None => crate::hub::resolve_local_gguf_file(&state, model_id).await,
+        None => crate::hub::resolve_local_gguf_file(state, model_id).await,
     }
     .ok_or_else(|| ApiError::not_found(format!("Модель {model_id} не найдена на диске")))?;
 
     // Путь из сканера тоже проверяем песочницей: наружу не отдаём ничего
     let roots = state.model_roots().await;
-    let path = crate::paths::resolve_existing_within(&roots, &found.to_string_lossy())
-        .map_err(|rejection| ApiError::from_path_rejection(rejection, "модель"))?;
+    crate::paths::resolve_existing_within(&roots, &found.to_string_lossy())
+        .map_err(|rejection| ApiError::from_path_rejection(rejection, "модель"))
+}
 
+pub async fn handle_model_cached_path(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<serde_json::Value>,
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    let path = resolve_cached_model_path(&state, &query).await?;
     Ok(Json(serde_json::json!({
         "path": path.to_string_lossy(),
         "is_dir": path.is_dir()
@@ -2000,9 +2016,51 @@ pub async fn handle_model_cached_path(
 }
 
 pub async fn handle_model_reveal(
-    Json(_payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "revealed": true }))
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    let path = resolve_cached_model_path(&state, &payload).await?;
+    // Для файла открываем папку, в которой он лежит
+    let folder = if path.is_dir() {
+        path.clone()
+    } else {
+        path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| path.clone())
+    };
+    open_in_file_manager(&folder)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "revealed": true,
+        "path": folder.to_string_lossy()
+    })))
+}
+
+/// Открывает папку в системном файловом менеджере, не дожидаясь его закрытия.
+fn open_in_file_manager(folder: &std::path::Path) -> crate::error::ApiResult<()> {
+    let opener = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(opener)
+        .arg(folder)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| {
+            crate::error::ApiError::internal(format!(
+                "Не удалось открыть файловый менеджер ({opener}): {err}"
+            ))
+        })?;
+    // Дожидаемся процесса в отдельном потоке, чтобы он не остался «зомби»
+    std::thread::spawn(move || {
+        if let Err(err) = child.wait() {
+            tracing::warn!("Процесс файлового менеджера завершился с ошибкой: {err}");
+        }
+    });
+    Ok(())
 }
 
 pub async fn handle_model_kv_cache_estimate(
@@ -2159,13 +2217,9 @@ pub async fn handle_models_export_size(
     }))
 }
 
-pub async fn handle_models_delete_finetuned(
-    Json(_payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "deleted": true
-    }))
+pub async fn handle_models_delete_finetuned() -> crate::error::ApiError {
+    // Раньше отвечало «deleted: true», ничего не удаляя
+    crate::unavailable::not_ready("Дообученные модели", 3)
 }
 
 pub async fn handle_picker_validate_chat_template(
@@ -2240,45 +2294,6 @@ pub async fn handle_inference_monitor_reset() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok", "reset": true }))
 }
 
-pub async fn handle_profile_stats() -> Json<serde_json::Value> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Json(serde_json::json!({
-        "generatedAt": now,
-        "days": 30,
-        "totals": {
-            "threads": 1,
-            "messages": 5,
-            "userMessages": 2,
-            "assistantMessages": 3,
-            "promptTokens": 500,
-            "completionTokens": 350,
-            "totalTokens": 850,
-            "chatPromptTokens": 500,
-            "chatCompletionTokens": 350,
-            "chatTokens": 850,
-            "apiPromptTokens": 0,
-            "apiCompletionTokens": 0,
-            "apiTokens": 0,
-            "cachedTokens": 0,
-            "toolCalls": 0,
-            "attachments": 0,
-            "activeDays": 1,
-            "chatSeconds": 45
-        },
-        "streak": {
-            "current": 1,
-            "longest": 1,
-            "lastActiveDay": "2026-09-11"
-        },
-        "series": [],
-        "topModels": [],
-        "recentRuns": []
-    }))
-}
-
 pub async fn handle_studio_release_notes() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version": "0.1.0",
@@ -2350,8 +2365,11 @@ pub async fn handle_auth_desktop_initial_password() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-pub async fn handle_shutdown() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "message": "Server shutting down" }))
+pub async fn handle_shutdown(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // Остановка мягкая: сервер дождётся завершения текущих запросов, включая этот ответ
+    state.shutdown.notify_one();
+    tracing::info!("Запрошена остановка сервера из интерфейса");
+    Json(serde_json::json!({ "status": "ok", "message": "Сервер останавливается" }))
 }
 
 pub async fn handle_providers_public_key() -> Json<serde_json::Value> {
@@ -2366,8 +2384,9 @@ pub async fn handle_providers_models_post() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "models": [] }))
 }
 
-pub async fn handle_providers_test() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "success": true, "message": "Connection valid" }))
+pub async fn handle_providers_test() -> crate::error::ApiError {
+    // Раньше всегда отвечало «Connection valid», ничего не проверяя
+    crate::unavailable::not_ready("Подключение внешних провайдеров", 4)
 }
 
 pub async fn handle_providers_detail_put(
@@ -2393,12 +2412,16 @@ pub async fn handle_export_logs() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "logs": [] }))
 }
 
-pub async fn handle_export_load_checkpoint() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+/// Этап дорожной карты, на котором появится экспорт (вместе с настоящим обучением).
+const EXPORT_STAGE: u8 = 3;
+
+pub async fn handle_export_load_checkpoint() -> crate::error::ApiError {
+    crate::unavailable::not_ready("Экспорт моделей", EXPORT_STAGE)
 }
 
-pub async fn handle_export_action() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "job_id": "export-job-1" }))
+pub async fn handle_export_action() -> crate::error::ApiError {
+    // Раньше возвращало «успех» с job_id, а файл не создавался
+    crate::unavailable::not_ready("Экспорт моделей", EXPORT_STAGE)
 }
 
 pub async fn handle_train_run_delete(
@@ -2421,16 +2444,19 @@ pub async fn handle_llama_update_status() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_llama_update() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "message": "Already up to date"
-    }))
+pub async fn handle_llama_update() -> crate::error::ApiError {
+    crate::error::ApiError::not_implemented(
+        "SlothForge использует собственный Vulkan-движок, обновлять llama.cpp не нужно",
+    )
 }
 
+/// Список баз знаний. Фронтенд ждёт здесь 200 даже без RAG и отличает
+/// «баз пока нет» от «RAG недоступен» по полю ragAvailable.
 pub async fn handle_rag_knowledge_bases() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "knowledge_bases": []
+        "knowledgeBases": [],
+        "ragAvailable": false,
+        "ragUnavailableReason": crate::unavailable::not_ready("RAG (базы знаний)", 4).detail
     }))
 }
 
@@ -2441,12 +2467,6 @@ pub async fn handle_diffusion_status() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_api_not_found(uri: axum::http::Uri) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({
-            "error": "API endpoint not found",
-            "path": uri.path()
-        })),
-    )
+pub async fn handle_api_not_found(uri: axum::http::Uri) -> crate::error::ApiError {
+    crate::error::ApiError::not_found(format!("Эндпоинт API не найден: {}", uri.path()))
 }

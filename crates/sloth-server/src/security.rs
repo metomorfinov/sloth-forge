@@ -5,10 +5,13 @@
 //! 2. **Проверка заголовка Host** — защита от «DNS rebinding»: чужой сайт может
 //!    привязать своё доменное имя к адресу 127.0.0.1 и так обойти CORS. Такие запросы
 //!    приходят с чужим именем хоста, и мы их отклоняем до маршрутизации.
+//! 3. **Проверка Origin у изменяющих запросов** — защита от CSRF: CORS мешает чужому
+//!    сайту прочитать ответ, но не отправить POST или DELETE. Браузер всегда добавляет
+//!    к таким межсайтовым запросам заголовок Origin, по нему они и отклоняются.
 
 use crate::error::ApiError;
 use axum::extract::Request;
-use axum::http::{header, HeaderValue};
+use axum::http::{header, HeaderValue, Method};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::net::IpAddr;
@@ -80,8 +83,22 @@ pub fn cors_layer() -> CorsLayer {
         .allow_headers(Any)
 }
 
-/// Middleware: отклоняет запросы с недопустимым заголовком `Host`.
-pub async fn enforce_allowed_host(request: Request, next: Next) -> Response {
+/// Запрос что-то меняет (не GET/HEAD/OPTIONS) и пришёл со страницы чужого сайта.
+fn is_foreign_state_change(request: &Request) -> bool {
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return false;
+    }
+    request
+        .headers()
+        .get(header::ORIGIN)
+        .is_some_and(|origin| !origin.to_str().map(is_allowed_origin).unwrap_or(false))
+}
+
+/// Middleware: отклоняет запросы с чужим `Host` и изменяющие запросы с чужим `Origin`.
+pub async fn guard_local_requests(request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get(header::HOST)
@@ -95,7 +112,18 @@ pub async fn enforce_allowed_host(request: Request, next: Next) -> Response {
         });
 
     match host {
-        Some(host) if is_allowed_host(strip_port(&host)) => next.run(request).await,
+        Some(host) if is_allowed_host(strip_port(&host)) => {
+            if is_foreign_state_change(&request) {
+                tracing::warn!(
+                    "Отклонён изменяющий запрос с чужого сайта: {} {}",
+                    request.method(),
+                    request.uri().path()
+                );
+                return ApiError::forbidden("Изменяющий запрос со страницы чужого сайта отклонён")
+                    .into_response();
+            }
+            next.run(request).await
+        }
         Some(host) => {
             tracing::warn!("Отклонён запрос с недопустимым Host: {host}");
             ApiError::forbidden(format!(

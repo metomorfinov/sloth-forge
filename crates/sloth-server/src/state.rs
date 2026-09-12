@@ -298,6 +298,8 @@ pub struct AppState {
     pub static_dir: Option<PathBuf>,
     /// Порт, на котором реально слушает сервер (показывается в настройках доступа по сети).
     pub server_port: std::sync::atomic::AtomicU16,
+    /// Сигнал мягкой остановки сервера (кнопка «Остановить» в интерфейсе, POST /api/shutdown).
+    pub shutdown: tokio::sync::Notify,
     pub master_gradients: Arc<RwLock<Vec<f32>>>,
     pub training_mutex: Arc<Mutex<()>>,
     pub download_state: Arc<RwLock<DownloadState>>,
@@ -357,6 +359,7 @@ impl AppState {
             models_dir,
             static_dir,
             server_port: std::sync::atomic::AtomicU16::new(crate::DEFAULT_PORT),
+            shutdown: tokio::sync::Notify::new(),
             master_gradients,
             training_mutex: Arc::new(Mutex::new(())),
             download_state: Arc::new(RwLock::new(DownloadState::default())),

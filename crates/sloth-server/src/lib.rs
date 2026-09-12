@@ -7,9 +7,11 @@ pub mod hub;
 pub mod locations;
 pub mod models;
 pub mod paths;
+pub mod profile_stats;
 pub mod security;
 pub mod state;
 pub mod training;
+pub mod unavailable;
 
 use axum::{
     routing::{delete, get, post, put},
@@ -47,7 +49,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/auth/api-keys", get(api::handle_auth_api_keys_get).post(api::handle_auth_api_keys_post))
         .route("/auth/api-keys/:id", delete(api::handle_auth_api_keys_delete))
         .route("/shutdown", post(api::handle_shutdown))
-        .route("/profile/stats", get(api::handle_profile_stats))
+        .route("/profile/stats", get(profile_stats::handle_profile_stats))
         .route("/studio/install-source", get(api::handle_install_source))
         .route("/studio/update-status", get(api::handle_update_status))
         .route("/studio/release-notes", get(api::handle_studio_release_notes))
@@ -231,7 +233,13 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/llama/update-changelog", get(api::handle_llama_update_changelog))
         .route("/llama/update", post(api::handle_llama_update))
         .route("/llama/backend", get(api::handle_llama_backend).post(api::handle_llama_backend))
-        .route("/rag/knowledge-bases", get(api::handle_rag_knowledge_bases))
+        // Список баз знаний отвечает 200 с ragAvailable: false, остальные методы — 501 (раньше 405)
+        .route(
+            "/rag/knowledge-bases",
+            get(api::handle_rag_knowledge_bases).fallback(unavailable::pending("RAG (базы знаний)", 4)),
+        )
+        // Разделы без бэкенда отвечают 501 с объяснением вместо 404/405
+        .merge(unavailable::pending_api_routes())
         // Fallback for unmatched /api/* calls so they never receive index.html
         .fallback(api::handle_api_not_found);
 
@@ -242,6 +250,8 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/ws/telemetry", get(handle_ws_telemetry))
         .route("/v1/chat/completions", post(chat::handle_chat_completions))
         .route("/v1/models", get(handle_models))
+        // /v1/images, /v1/videos, /v1/audio и /openapi.json: JSON с объяснением вместо HTML
+        .merge(unavailable::pending_root_routes())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -257,7 +267,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
 
     // Проверка Host — самый внешний слой: запрос с чужим именем хоста отклоняется
     // раньше, чем дойдёт до API или статики
-    app.layer(axum::middleware::from_fn(security::enforce_allowed_host))
+    app.layer(axum::middleware::from_fn(security::guard_local_requests))
 }
 
 pub async fn run_server_with_listener(
@@ -284,11 +294,30 @@ pub async fn run_server_with_listener(
         .server_port
         .store(addr.port(), std::sync::atomic::Ordering::Relaxed);
 
-    let app = create_router(state, static_dir);
+    let app = create_router(Arc::clone(&state), static_dir);
 
     info!("SlothForge Axum server listening on http://{}", addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await?;
+    info!("Сервер остановлен");
     Ok(())
+}
+
+/// Сигнал мягкой остановки: Ctrl+C в терминале или кнопка «Остановить» в интерфейсе.
+/// Текущие запросы успевают завершиться.
+async fn shutdown_signal(state: Arc<AppState>) {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            // Без обработчика Ctrl+C остаётся остановка из интерфейса, поэтому просто ждём её
+            warn!("Не удалось подписаться на Ctrl+C: {err}");
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => info!("Получен Ctrl+C, останавливаю сервер"),
+        _ = state.shutdown.notified() => info!("Останавливаю сервер по запросу из интерфейса"),
+    }
 }
 
 pub async fn run_server(addr: SocketAddr, static_dir: Option<PathBuf>) -> anyhow::Result<()> {

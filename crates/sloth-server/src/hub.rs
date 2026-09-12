@@ -1475,13 +1475,13 @@ pub async fn handle_datasets_cached() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_datasets_cached_delete(
-    Json(_payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "deleted": true
-    }))
+/// Датасеты появятся вместе с настоящим обучением (этап 3 дорожной карты).
+/// До этого изменяющие обработчики честно отвечают 501 вместо фальшивого «успеха».
+const DATASETS_FEATURE: &str = "Датасеты";
+const DATASETS_STAGE: u8 = 3;
+
+pub async fn handle_datasets_cached_delete() -> crate::error::ApiError {
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }
 
 pub async fn handle_datasets_local() -> Json<serde_json::Value> {
@@ -1496,40 +1496,13 @@ pub async fn handle_datasets_active_downloads() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_datasets_download(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let repo_id = payload
-        .get("repo_id")
-        .or_else(|| payload.get("repoId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unsloth/Open-Orca")
-        .to_string();
-
-    Json(serde_json::json!({
-        "repo_id": repo_id,
-        "state": "running",
-        "accepted": true,
-        "generation": 1,
-        "attached": false,
-        "transport": "http"
-    }))
+pub async fn handle_datasets_download() -> crate::error::ApiError {
+    // Раньше отвечало state: "running", но загрузка не начиналась
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }
 
-pub async fn handle_datasets_download_cancel(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let repo_id = payload
-        .get("repo_id")
-        .or_else(|| payload.get("repoId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unsloth/Open-Orca")
-        .to_string();
-
-    Json(serde_json::json!({
-        "repo_id": repo_id,
-        "state": "cancelled"
-    }))
+pub async fn handle_datasets_download_cancel() -> crate::error::ApiError {
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }
 
 pub async fn handle_datasets_download_status(
@@ -1762,38 +1735,16 @@ pub async fn handle_token_validate() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_datasets_check_format(
-    Json(_payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "requires_manual_mapping": false,
-        "detected_format": "alpaca",
-        "columns": ["instruction", "input", "output"],
-        "suggested_mapping": {
-            "instruction": "instruction",
-            "input": "input",
-            "output": "output"
-        },
-        "total_rows": 1000
-    }))
+pub async fn handle_datasets_check_format() -> crate::error::ApiError {
+    // Раньше для любого файла отвечало «alpaca, 1000 строк», не читая его
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }
 
-pub async fn handle_datasets_upload() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "filename": "dataset.jsonl",
-        "stored_path": "models/dataset.jsonl"
-    }))
+pub async fn handle_datasets_upload() -> crate::error::ApiError {
+    // Раньше не читало тело запроса и возвращало путь к несуществующему файлу
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }
 
-pub async fn handle_datasets_ai_assist_mapping(
-    Json(_payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "success": true,
-        "suggested_mapping": {
-            "instruction": "instruction",
-            "input": "input",
-            "output": "output"
-        }
-    }))
+pub async fn handle_datasets_ai_assist_mapping() -> crate::error::ApiError {
+    crate::unavailable::not_ready(DATASETS_FEATURE, DATASETS_STAGE)
 }

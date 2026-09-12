@@ -1154,11 +1154,12 @@ async fn test_settings_and_studio_export_endpoints() {
     assert!(inf_gpu_dev["gpu_name"].as_str().unwrap().contains("AMD Radeon RX 570"));
     assert_eq!(inf_gpu_dev["memory_total_gb"].as_f64(), Some(4.0));
 
-    // RAG knowledge bases
+    // RAG knowledge bases: формат фронтенда (camelCase) и честный признак недоступности RAG
     let resp = client.get(format!("{base_url}/api/rag/knowledge-bases")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["knowledge_bases"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["knowledgeBases"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(body["ragAvailable"].as_bool(), Some(false));
 }
 
 #[tokio::test]
@@ -1222,6 +1223,9 @@ async fn test_hub_datasets_download_lifecycle() {
     let (base_url, _) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
+    // Датасеты появятся на этапе 3: изменяющие запросы честно отвечают 501 с detail,
+    // а статус показывает, что никакой загрузки нет (раньше был фальшивый "running")
+
     // 1. Start dataset download
     let start_payload = serde_json::json!({
         "repo_id": "unsloth/Open-Orca",
@@ -1234,12 +1238,9 @@ async fn test_hub_datasets_download_lifecycle() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["repo_id"].as_str(), Some("unsloth/Open-Orca"));
-    assert_eq!(body["state"].as_str(), Some("running"));
-    assert_eq!(body["accepted"].as_bool(), Some(true));
-    assert_eq!(body["generation"].as_u64(), Some(1));
+    assert!(body["detail"].is_string());
 
     // 2. Dataset download status
     let resp = client
@@ -1263,10 +1264,9 @@ async fn test_hub_datasets_download_lifecycle() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["repo_id"].as_str(), Some("unsloth/Open-Orca"));
-    assert_eq!(body["state"].as_str(), Some("cancelled"));
+    assert!(body["detail"].is_string());
 
     // 4. Delete cached dataset
     let del_payload = serde_json::json!({
@@ -1278,9 +1278,9 @@ async fn test_hub_datasets_download_lifecycle() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert!(body["detail"].is_string());
 }
 
 #[tokio::test]
@@ -1450,17 +1450,17 @@ async fn test_hub_token_validate_and_dataset_utils() {
     let val: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(val["status"].as_str(), Some("valid"));
 
-    // 2. POST /api/hub/datasets/check-format
+    // 2. POST /api/hub/datasets/check-format: до этапа 3 честный 501 вместо
+    //    выдуманного «alpaca, 1000 строк» для любого файла
     let resp = client
         .post(format!("{base_url}/api/hub/datasets/check-format"))
         .json(&serde_json::json!({"dataset_name": "yahma/alpaca-cleaned"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
     let cf: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(cf["requires_manual_mapping"].as_bool(), Some(false));
-    assert_eq!(cf["detected_format"].as_str(), Some("alpaca"));
+    assert!(cf["detail"].is_string());
 
     // 3. POST /api/hub/delete-impact
     let resp = client
@@ -1539,10 +1539,11 @@ async fn test_audited_endpoints_and_schemas() {
     let mp: serde_json::Value = resp.json().await.unwrap();
     assert!(mp["detail"].is_string());
 
+    // Открыть в файловом менеджере можно только существующую модель
     let resp = client.post(format!("{base_url}/api/models/reveal-cached-model"))
         .json(&serde_json::json!({ "repo_id": "test/model" }))
         .send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // 7. Model progress under /models/
     let resp = client.get(format!("{base_url}/api/models/download-progress?job_id=nonexistent")).send().await.unwrap();
@@ -1599,11 +1600,12 @@ async fn test_audited_endpoints_and_schemas() {
     let resp = client.get(format!("{base_url}/api/llama/update-changelog")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    // 13. Export actions
+    // 13. Export actions: экспорт появится на этапе 3, до этого честный 501 вместо
+    //     «успеха» с job_id, после которого файл не создавался
     let resp = client.get(format!("{base_url}/api/export/logs")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let resp = client.post(format!("{base_url}/api/export/export/gguf")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
 }
 
 #[tokio::test]

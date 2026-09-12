@@ -218,3 +218,34 @@ async fn cached_model_path_never_resolves_outside_models() {
 
     assert_ne!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn rejects_state_changing_request_from_foreign_origin() {
+    let sandbox = make_sandbox();
+    let base_url = spawn_server(sandbox.models.clone()).await;
+    let model = sandbox.models.join("model-Q4_K_M.gguf");
+    let body = serde_json::json!({ "cache_path": model.to_string_lossy() });
+    let client = reqwest::Client::new();
+
+    // Страница чужого сайта пытается удалить модель (CSRF)
+    let foreign = client
+        .delete(format!("{base_url}/api/hub/delete-cached"))
+        .header(ORIGIN, "http://evil.example")
+        .json(&body)
+        .send()
+        .await
+        .expect("запрос не отправлен");
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+    assert!(model.exists(), "чужой сайт не должен удалять модели");
+
+    // Тот же запрос из интерфейса SlothForge проходит
+    let local = client
+        .delete(format!("{base_url}/api/hub/delete-cached"))
+        .header(ORIGIN, "http://localhost:3000")
+        .json(&body)
+        .send()
+        .await
+        .expect("запрос не отправлен");
+    assert_eq!(local.status(), StatusCode::OK);
+    assert!(!model.exists());
+}
