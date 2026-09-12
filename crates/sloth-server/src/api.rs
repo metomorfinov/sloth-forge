@@ -1133,7 +1133,25 @@ pub async fn handle_settings_download_transport_put(
 
 pub async fn handle_settings_embedding_model() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "model": null
+        "embedding_model": "BAAI/bge-small-en-v1.5",
+        "embedding_gguf_repo": "BAAI/bge-small-en-v1.5-GGUF",
+        "default_embedding_model": "BAAI/bge-small-en-v1.5",
+        "default_embedding_gguf_repo": "BAAI/bge-small-en-v1.5-GGUF",
+        "is_custom": false,
+        "loaded": false,
+        "backend_loaded": false
+    }))
+}
+
+pub async fn handle_settings_embedding_model_resolve() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "embedding_model": "BAAI/bge-small-en-v1.5",
+        "backend": "sentence-transformers",
+        "download_repo": null,
+        "files": null,
+        "cached": false,
+        "size_bytes": 133000000,
+        "error": null
     }))
 }
 
@@ -1211,10 +1229,74 @@ pub async fn handle_llama_backend() -> Json<serde_json::Value> {
     }))
 }
 
-pub async fn handle_settings_hugging_face_cache() -> Json<serde_json::Value> {
+pub async fn handle_settings_lan_access() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "path": null,
-        "size_bytes": 0
+        "state": "off",
+        "urls": [],
+        "public_urls": [],
+        "error": null,
+        "auto_start": false,
+        "configured_port": 3000,
+        "active_port": null,
+        "managed_by": "settings",
+        "can_start": true,
+        "can_stop": false,
+        "block_reason": null,
+        "bind_host": null,
+        "wildcard_bind": false,
+        "serves_web_ui": true,
+        "keyless_lan_eligible": false,
+        "keyless_scope": "off",
+        "keyless_tools": false
+    }))
+}
+
+pub async fn handle_settings_lan_access_action(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    handle_settings_lan_access().await
+}
+
+pub async fn handle_settings_lan_access_post() -> Json<serde_json::Value> {
+    handle_settings_lan_access().await
+}
+
+pub async fn handle_settings_helper_precache() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": false,
+        "default_enabled": false,
+        "disabled_by_env": false
+    }))
+}
+
+pub async fn handle_settings_helper_precache_put(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    Json(serde_json::json!({
+        "enabled": enabled,
+        "default_enabled": false,
+        "disabled_by_env": false
+    }))
+}
+
+pub async fn handle_settings_hugging_face_cache() -> Json<serde_json::Value> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/rivergod".to_string());
+    let cache_dir = format!("{}/.cache/huggingface", home);
+    let hub_dir = format!("{}/hub", cache_dir);
+    let xet_dir = format!("{}/xet", cache_dir);
+
+    Json(serde_json::json!({
+        "cache_home": cache_dir,
+        "hub_cache": hub_dir,
+        "xet_cache": xet_dir,
+        "source": "default",
+        "editable": false,
+        "is_custom": false,
+        "available": true,
+        "writable": true,
+        "free_bytes": 107374182400u64,
+        "environment_variable": null
     }))
 }
 
@@ -1226,19 +1308,56 @@ pub async fn handle_settings_keyless_api_access() -> Json<serde_json::Value> {
 
 pub async fn handle_settings_remote_access() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "enabled": false
+        "state": "off",
+        "url": null,
+        "error": null,
+        "auto_start": false,
+        "default_auto_start": false,
+        "available": false,
+        "managed_by": "settings",
+        "can_start": false,
+        "can_stop": false,
+        "block_reason": "explicitly_disabled",
+        "password_pending": false,
+        "streaming_supported": false
     }))
+}
+
+pub async fn handle_settings_remote_access_action(
+    Json(_payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    handle_settings_remote_access().await
+}
+
+pub async fn handle_settings_remote_access_post() -> Json<serde_json::Value> {
+    handle_settings_remote_access().await
 }
 
 pub async fn handle_settings_preview_sharing() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "enabled": false
+        "enabled": false,
+        "default_enabled": false
     }))
+}
+
+pub async fn handle_settings_preview_sharing_put(
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    Json(serde_json::json!({
+        "enabled": enabled,
+        "default_enabled": false
+    }))
+}
+
+pub async fn handle_settings_preview_links_rotate() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
 }
 
 pub async fn handle_settings_coding_agents() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "agents": []
+        "agents": ["claude", "cursor", "cline", "continue", "aider"],
+        "detected": []
     }))
 }
 
@@ -1250,13 +1369,29 @@ pub async fn handle_settings_current_date_prompt() -> Json<serde_json::Value> {
 
 pub async fn handle_settings_debug_logs_sources() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "sources": []
+        "sources": [],
+        "default_source_id": null,
+        "defaultSourceId": null,
+        "file_logging_disabled": false,
+        "fileLoggingDisabled": false
     }))
 }
 
 pub async fn handle_settings_debug_logs() -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "lines": []
+        "status": "ok",
+        "reason": null,
+        "source_id": null,
+        "realpath": null,
+        "lines": [],
+        "cursor": null,
+        "reset": false,
+        "reset_reason": null,
+        "dropped_bytes": 0,
+        "truncated_head": false,
+        "more_pending": false,
+        "file_logging_disabled": false,
+        "size_bytes": 0
     }))
 }
 

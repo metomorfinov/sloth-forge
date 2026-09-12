@@ -19,6 +19,7 @@ import {
   UiFontRow,
   UiFontSizeRow,
 } from "../components/appearance-custom-controls";
+import { LanguageSelect } from "../components/language-select";
 import { PaletteCards } from "../components/palette-cards";
 import { SettingsRow } from "../components/settings-row";
 import { SidebarMenuCustomizer } from "../components/sidebar-menu-customizer";
@@ -76,6 +77,15 @@ export function AppearanceTab() {
           className="flex-col items-stretch gap-3"
         >
           <PaletteCards />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.appearance.language.title")}>
+        <SettingsRow
+          label={t("settings.appearance.language.label")}
+          description={t("settings.appearance.language.description")}
+        >
+          <LanguageSelect />
         </SettingsRow>
       </SettingsSection>
 

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct RepoVariantsQuery {
@@ -539,7 +539,8 @@ pub async fn handle_download_start(
         .get("filename")
         .or_else(|| payload.get("file_name"))
         .or_else(|| payload.get("fileName"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let files_arr: Vec<String> = payload
         .get("files")
@@ -554,46 +555,105 @@ pub async fn handle_download_start(
         })
         .unwrap_or_default();
 
-    let filename = if let Some(f) = filename_field {
-        f.to_string()
-    } else if let Some(f) = files_arr.first() {
-        f.clone()
-    } else if variant.ends_with(".gguf") {
-        variant.clone()
-    } else if variant.contains("Q8_0") {
-        "model-Q8_0.gguf".to_string()
-    } else if variant.contains("Q4_K_M") {
-        "model-Q4_K_M.gguf".to_string()
-    } else {
-        format!("model-{}.gguf", variant)
-    };
-
     let revision = payload
         .get("revision")
         .and_then(|v| v.as_str())
         .unwrap_or("main")
         .to_string();
 
-    let total_bytes = {
-        let cache = state.gguf_variants_cache.read().await;
-        cache.get(&repo_id).and_then(|(_, v)| {
-            v.get("variants")?.as_array()?.iter().find_map(|var| {
-                let v_quant = var.get("quant")?.as_str()?;
-                let v_fname = var.get("filename")?.as_str()?;
-                if v_quant == variant || v_fname == filename || filename.contains(v_quant) {
-                    var.get("size_bytes")?.as_u64()
-                } else {
-                    None
-                }
-            })
-        }).unwrap_or_else(|| {
-            let (est_q4, est_q8, _) = estimate_model_quant_sizes(&repo_id);
-            if variant.contains("Q8_0") || filename.contains("Q8_0") {
-                est_q8
+    // Resolve real file paths and sizes from HF tree / variants cache
+    let (files_to_download, primary_filename, resolved_bytes) = {
+        if !files_arr.is_empty() {
+            let primary = files_arr.first().cloned().unwrap_or_default();
+            (files_arr, primary, 0u64)
+        } else if let Some(ref f) = filename_field {
+            if !f.starts_with("model-") || f.ends_with(".gguf") {
+                (vec![f.clone()], f.clone(), 0u64)
             } else {
-                est_q4
+                (Vec::new(), String::new(), 0u64)
             }
-        })
+        } else {
+            (Vec::new(), String::new(), 0u64)
+        }
+    };
+
+    let (files_to_download, primary_filename, total_bytes) = if !files_to_download.is_empty() {
+        let tb = if resolved_bytes > 0 {
+            resolved_bytes
+        } else {
+            let (est_q4, est_q8, _) = estimate_model_quant_sizes(&repo_id);
+            if variant.contains("Q8_0") { est_q8 } else { est_q4 }
+        };
+        (files_to_download, primary_filename, tb)
+    } else {
+        // Query variants cache or fetch from HF tree
+        let variants_json = {
+            let cache = state.gguf_variants_cache.read().await;
+            cache.get(&repo_id).map(|(_, v)| v.clone())
+        };
+        let variants_json = match variants_json {
+            Some(v) => Some(v),
+            None => fetch_hf_tree_variants(&state, &repo_id).await,
+        };
+
+        let mut matched_files: Vec<String> = Vec::new();
+        let mut matched_primary = String::new();
+        let mut matched_bytes = 0u64;
+
+        if let Some(ref val) = variants_json {
+            if let Some(var_arr) = val.get("variants").and_then(|v| v.as_array()) {
+                let target_quant = variant.trim();
+                for var in var_arr {
+                    let q = var.get("quant").and_then(|v| v.as_str()).unwrap_or("");
+                    let fname = var.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+                    if q.eq_ignore_ascii_case(target_quant)
+                        || fname.eq_ignore_ascii_case(target_quant)
+                        || fname.contains(target_quant)
+                    {
+                        if let Some(fls) = var.get("files").and_then(|v| v.as_array()) {
+                            matched_files = fls.iter().filter_map(|s| s.as_str().map(|x| x.to_string())).collect();
+                        }
+                        matched_primary = fname.to_string();
+                        matched_bytes = var.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if matched_files.is_empty() {
+            // Canonical fallback names for known popular model families on Hugging Face
+            let repo_lower = repo_id.to_lowercase();
+            let repo_part = repo_id.split('/').last().unwrap_or(&repo_id);
+            let fallback_file = if repo_lower.contains("llama-3.2-3b") {
+                format!("Llama-3.2-3B-Instruct-{}.gguf", variant)
+            } else if repo_lower.contains("llama-3.2-1b") {
+                format!("Llama-3.2-1B-Instruct-{}.gguf", variant)
+            } else if repo_lower.contains("deepseek-r1-distill-qwen-1.5b") {
+                format!("DeepSeek-R1-Distill-Qwen-1.5B-{}.gguf", variant)
+            } else if repo_lower.contains("qwen2.5-1.5b") {
+                format!("qwen2.5-1.5b-instruct-{}.gguf", variant.to_lowercase())
+            } else {
+                format!("{}-{}.gguf", repo_part, variant)
+            };
+            matched_primary = fallback_file.clone();
+            matched_files = vec![fallback_file];
+        }
+
+        let tb = if matched_bytes > 0 {
+            matched_bytes
+        } else {
+            let (est_q4, est_q8, _) = estimate_model_quant_sizes(&repo_id);
+            if variant.contains("Q8_0") { est_q8 } else { est_q4 }
+        };
+
+        (matched_files, matched_primary, tb)
+    };
+
+    let filename = if !primary_filename.is_empty() {
+        primary_filename
+    } else {
+        files_to_download.first().cloned().unwrap_or_else(|| format!("{}-{}.gguf", repo_id.replace('/', "-"), variant))
     };
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -618,121 +678,147 @@ pub async fn handle_download_start(
     let state_clone = Arc::clone(&state);
     let models_dir = state.models_dir.clone();
     let repo_for_task = repo_id.clone();
-    let filename_for_task = filename.clone();
+    let variant_for_task = variant.clone();
     let revision_for_task = revision.clone();
+    let files_task = files_to_download.clone();
 
     tokio::spawn(async move {
         let _ = tokio::fs::create_dir_all(&models_dir).await;
-        let target_file = models_dir.join(&filename_for_task);
-        if let Some(parent) = target_file.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        let part_file = models_dir.join(format!("{}.part", filename_for_task));
-        if let Some(parent) = part_file.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-
-        let url = format!(
-            "https://huggingface.co/{}/resolve/{}/{}",
-            repo_for_task, revision_for_task, filename_for_task
-        );
-
-        info!("Starting HTTP GGUF download from {} to {:?}", url, target_file);
-
-        // Attempt direct HTTP download via reqwest (no Hugging Face token required)
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::limited(15))
+            .user_agent("sloth-forge/0.1.0")
+            .timeout(Duration::from_secs(7200))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        let mut downloaded_successfully = false;
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                let content_len = resp.content_length().unwrap_or(total_bytes);
-                {
-                    let mut ds = state_clone.download_state.write().await;
-                    ds.total_bytes = content_len;
+        let mut completed_bytes: u64 = 0;
+        let mut all_succeeded = true;
+        let mut fail_reason = String::new();
+
+        for shard_rel in &files_task {
+            if *cancel_rx.borrow() {
+                let mut ds = state_clone.download_state.write().await;
+                ds.state = "cancelled".to_string();
+                return;
+            }
+
+            let shard_filename = shard_rel.split('/').last().unwrap_or(shard_rel);
+            let target_file = models_dir.join(shard_filename);
+            let part_file = models_dir.join(format!("{}.part", shard_filename));
+
+            // Check if shard is already complete on disk
+            if target_file.exists() {
+                if let Ok(meta) = tokio::fs::metadata(&target_file).await {
+                    if meta.len() > 1024 * 1024 {
+                        info!("Shard {:?} already present ({} bytes), skipping", target_file, meta.len());
+                        completed_bytes += meta.len();
+                        let mut ds = state_clone.download_state.write().await;
+                        ds.downloaded_bytes = completed_bytes;
+                        if ds.total_bytes > 0 {
+                            ds.percent = ((completed_bytes as f64 / ds.total_bytes as f64) * 100.0).min(99.9) as f32;
+                        }
+                        continue;
+                    }
                 }
+            }
 
-                if let Ok(mut file) = tokio::fs::File::create(&part_file).await {
-                    use tokio::io::AsyncWriteExt;
-                    let mut stream = resp.bytes_stream();
-                    let mut dl = 0u64;
-                    let mut cancelled = false;
+            let url = format!(
+                "https://huggingface.co/{}/resolve/{}/{}",
+                repo_for_task, revision_for_task, shard_rel
+            );
+            info!("Downloading GGUF shard from {} to {:?}", url, target_file);
 
-                    while let Some(chunk_res) = stream.next().await {
-                        if *cancel_rx.borrow() {
-                            cancelled = true;
-                            break;
-                        }
-                        if let Ok(chunk) = chunk_res {
-                            if file.write_all(&chunk).await.is_ok() {
-                                dl += chunk.len() as u64;
-                                let pct = ((dl as f64 / content_len as f64) * 100.0).min(99.9) as f32;
-                                let mut ds = state_clone.download_state.write().await;
-                                ds.downloaded_bytes = dl;
-                                ds.percent = pct;
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let _shard_content_len = resp.content_length().unwrap_or(0);
+                    if let Ok(mut file) = tokio::fs::File::create(&part_file).await {
+                        use tokio::io::AsyncWriteExt;
+                        let mut stream = resp.bytes_stream();
+                        let mut shard_dl = 0u64;
+                        let mut cancelled = false;
+
+                        while let Some(chunk_res) = stream.next().await {
+                            if *cancel_rx.borrow() {
+                                cancelled = true;
+                                break;
                             }
+                            match chunk_res {
+                                Ok(chunk) => {
+                                    if file.write_all(&chunk).await.is_ok() {
+                                        shard_dl += chunk.len() as u64;
+                                        let current_total = completed_bytes + shard_dl;
+                                        let mut ds = state_clone.download_state.write().await;
+                                        ds.downloaded_bytes = current_total;
+                                        if ds.total_bytes > 0 {
+                                            ds.percent = ((current_total as f64 / ds.total_bytes as f64) * 100.0).min(99.9) as f32;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Stream error on {}: {}", shard_filename, e);
+                                    all_succeeded = false;
+                                    fail_reason = format!("Stream error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+
+                        if cancelled {
+                            let _ = tokio::fs::remove_file(&part_file).await;
+                            let mut ds = state_clone.download_state.write().await;
+                            ds.state = "cancelled".to_string();
+                            return;
+                        }
+
+                        if shard_dl > 0 && all_succeeded {
+                            let _ = file.flush().await;
+                            let _ = tokio::fs::rename(&part_file, &target_file).await;
+                            completed_bytes += shard_dl;
+                            info!("Shard {:?} download complete ({} bytes)", target_file, shard_dl);
                         } else {
+                            let _ = tokio::fs::remove_file(&part_file).await;
+                            all_succeeded = false;
                             break;
                         }
+                    } else {
+                        warn!("Could not create part file {:?}", part_file);
+                        all_succeeded = false;
+                        fail_reason = format!("Failed to create part file {:?}", part_file);
+                        break;
                     }
-
-                    if cancelled {
-                        let _ = tokio::fs::remove_file(&part_file).await;
-                        let mut ds = state_clone.download_state.write().await;
-                        ds.state = "cancelled".to_string();
-                        return;
-                    }
-
-                    if dl > 0 {
-                        let _ = file.flush().await;
-                        let _ = tokio::fs::rename(&part_file, &target_file).await;
-                        let mut ds = state_clone.download_state.write().await;
-                        ds.downloaded_bytes = dl;
-                        ds.total_bytes = dl;
-                        ds.percent = 100.0;
-                        ds.state = "complete".to_string();
-                        downloaded_successfully = true;
-                    }
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    warn!("Hugging Face returned status {} for {}", status, url);
+                    all_succeeded = false;
+                    fail_reason = format!("Hugging Face returned HTTP {}", status);
+                    break;
+                }
+                Err(err) => {
+                    warn!("Network request failed for {}: {}", url, err);
+                    all_succeeded = false;
+                    fail_reason = format!("Network error: {err}");
+                    break;
                 }
             }
         }
 
-        if !downloaded_successfully {
-            // Simulated / local progressive fallback (handles offline, mock repos, and tests gracefully)
-            info!("Running progressive download simulation for {:?}", target_file);
-            use tokio::io::AsyncWriteExt;
-            if let Ok(mut file) = tokio::fs::File::create(&part_file).await {
-                // Write GGUF magic header
-                let _ = file.write_all(b"GGUF\x03\x00\x00\x00").await;
-                let steps = 10;
-                let chunk_size = total_bytes / steps;
-                let mut current = 0u64;
-
-                for _ in 0..steps {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    if *cancel_rx.borrow() {
-                        let _ = tokio::fs::remove_file(&part_file).await;
-                        let mut ds = state_clone.download_state.write().await;
-                        ds.state = "cancelled".to_string();
-                        return;
-                    }
-
-                    current = (current + chunk_size).min(total_bytes);
-                    let pct = ((current as f64 / total_bytes as f64) * 100.0) as f32;
-                    let mut ds = state_clone.download_state.write().await;
-                    ds.downloaded_bytes = current;
-                    ds.percent = pct;
-                }
-
-                let _ = file.flush().await;
-                let _ = tokio::fs::rename(&part_file, &target_file).await;
-                let mut ds = state_clone.download_state.write().await;
-                ds.downloaded_bytes = total_bytes;
-                ds.percent = 100.0;
-                ds.state = "complete".to_string();
-            }
+        let mut ds = state_clone.download_state.write().await;
+        if all_succeeded && completed_bytes > 0 {
+            ds.downloaded_bytes = completed_bytes;
+            ds.total_bytes = completed_bytes;
+            ds.percent = 100.0;
+            ds.state = "complete".to_string();
+            info!(
+                "Successfully downloaded model {} ({}) to {:?} (total: {} bytes)",
+                repo_for_task, variant_for_task, models_dir, completed_bytes
+            );
+        } else {
+            ds.state = "failed".to_string();
+            error!(
+                "Download of {} ({}) failed: {}",
+                repo_for_task, variant_for_task, fail_reason
+            );
         }
     });
 

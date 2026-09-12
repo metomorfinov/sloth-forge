@@ -417,6 +417,15 @@ export function GeneralTab() {
         </p>
       </header>
 
+      <SettingsSection title={t("settings.appearance.language.title")}>
+        <SettingsRow
+          label={t("settings.appearance.language.label")}
+          description={t("settings.appearance.language.description")}
+        >
+          <LanguageSelect />
+        </SettingsRow>
+      </SettingsSection>
+
       {/* Desktop-only, and self-gating: outside the desktop app both render
           nothing and the section keeps just the version rows. */}
       <StudioVersionSection>
@@ -515,15 +524,6 @@ export function GeneralTab() {
             <ChangePasswordDialog />
           </SettingsRow>
         )}
-      </SettingsSection>
-
-      <SettingsSection title={t("settings.appearance.language.title")}>
-        <SettingsRow
-          label={t("settings.appearance.language.label")}
-          description={t("settings.appearance.language.description")}
-        >
-          <LanguageSelect />
-        </SettingsRow>
       </SettingsSection>
 
       <SettingsSection title={t("settings.general.permissions.sectionTitle")}>
