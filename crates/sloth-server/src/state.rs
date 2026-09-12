@@ -270,6 +270,25 @@ pub struct ScanFolderEntry {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadProgressState {
+    pub phase: Option<String>,
+    pub bytes_loaded: u64,
+    pub bytes_total: u64,
+    pub fraction: f64,
+}
+
+impl Default for LoadProgressState {
+    fn default() -> Self {
+        Self {
+            phase: None,
+            bytes_loaded: 0,
+            bytes_total: 0,
+            fraction: 0.0,
+        }
+    }
+}
+
 pub struct AppState {
     pub vk_ctx: Option<VulkanContext>,
     pub coordinator: Arc<ClusterCoordinator>,
@@ -290,6 +309,9 @@ pub struct AppState {
     pub personalization: Arc<RwLock<serde_json::Value>>,
     pub model_overrides: Arc<RwLock<serde_json::Value>>,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
+    pub chat_threads: Arc<RwLock<std::collections::HashMap<String, serde_json::Value>>>,
+    pub chat_messages: Arc<RwLock<std::collections::HashMap<String, Vec<serde_json::Value>>>>,
+    pub model_load_progress: Arc<RwLock<LoadProgressState>>,
 }
 
 impl AppState {
@@ -345,6 +367,9 @@ impl AppState {
             personalization: Arc::new(RwLock::new(default_personalization)),
             model_overrides: Arc::new(RwLock::new(serde_json::json!({}))),
             api_keys: Arc::new(RwLock::new(Vec::new())),
+            chat_threads: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            chat_messages: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            model_load_progress: Arc::new(RwLock::new(LoadProgressState::default())),
         }
     }
 }
