@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 pub const STATIC_DIR_ENV: &str = "STATIC_DIR";
 /// Переменная окружения с путём к папке моделей.
 pub const MODELS_DIR_ENV: &str = "SLOTH_MODELS_DIR";
+/// Переменная окружения с путём к папке данных (база истории чатов и настроек).
+pub const DATA_DIR_ENV: &str = "SLOTH_DATA_DIR";
+/// Имя файла базы данных внутри папки данных.
+pub const DATABASE_FILE_NAME: &str = "slothforge.db";
 
 /// Корень репозитория на момент сборки: `crates/sloth-server/../..`.
 fn project_root() -> PathBuf {
@@ -70,6 +74,31 @@ pub fn find_models_dir() -> PathBuf {
                 .map(|dir| dir.join("models"))
                 .unwrap_or_else(|| PathBuf::from("models"))
         })
+}
+
+/// Папка данных (база истории чатов и настроек). Если её ещё нет, выбирается `data`
+/// рядом с папкой моделей: в разработке это корень проекта, в установленной версии — папка программы.
+/// Сама папка создаётся при открытии базы.
+pub fn find_data_dir() -> PathBuf {
+    if let Some(custom) = std::env::var_os(DATA_DIR_ENV) {
+        return PathBuf::from(custom);
+    }
+    candidates(Path::new("data"))
+        .into_iter()
+        .find(|dir| dir.is_dir())
+        .map(normalize)
+        .unwrap_or_else(|| {
+            let models_dir = find_models_dir();
+            models_dir
+                .parent()
+                .map(|parent| parent.join("data"))
+                .unwrap_or_else(|| PathBuf::from("data"))
+        })
+}
+
+/// Полный путь к файлу базы данных.
+pub fn database_path() -> PathBuf {
+    find_data_dir().join(DATABASE_FILE_NAME)
 }
 
 #[cfg(test)]

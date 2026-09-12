@@ -37,21 +37,29 @@ pub struct ProfileStatsQuery {
 pub async fn handle_profile_stats(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ProfileStatsQuery>,
-) -> Json<Value> {
+) -> crate::error::ApiResult<Json<Value>> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0);
-    let threads = state.chat_threads.read().await;
-    let messages = state.chat_messages.read().await;
-    let runs = state.training.runs.read().await;
-    Json(compute_profile_stats(
+    // Треды, сообщения и запуски обучения — из постоянного хранилища
+    let (threads, messages, runs) = state
+        .store
+        .call(|conn| {
+            Ok::<_, crate::store::chat::ChatError>((
+                crate::store::chat::all_threads(conn)?,
+                crate::store::chat::all_messages(conn)?,
+                crate::store::runs::all(conn)?,
+            ))
+        })
+        .await?;
+    Ok(Json(compute_profile_stats(
         &threads,
         &messages,
         &runs,
         query.tz_offset_minutes,
         now_ms,
-    ))
+    )))
 }
 
 /// Сообщение, сведённое к полям, которые нужны статистике.

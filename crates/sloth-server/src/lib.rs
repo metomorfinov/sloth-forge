@@ -1,5 +1,6 @@
 pub mod api;
 pub mod chat;
+pub mod chat_history;
 pub mod cluster;
 pub mod error;
 pub mod handlers;
@@ -10,6 +11,7 @@ pub mod paths;
 pub mod profile_stats;
 pub mod security;
 pub mod state;
+pub mod store;
 pub mod training;
 pub mod unavailable;
 
@@ -146,22 +148,23 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/inference/chat", post(chat::handle_chat_completions))
         .route("/inference/chat/completions", post(chat::handle_chat_completions))
         .route("/inference/chat/count_tokens", post(api::handle_inference_count_tokens))
-        .route("/inference/chat-runs/active", get(api::handle_inference_chat_runs_active))
-        .route("/inference/chat-runs", post(api::handle_inference_chat_runs_post))
-        .route("/inference/chat-runs/:id", get(api::handle_inference_chat_runs_detail))
-        .route("/inference/chat-runs/:id/cancel", post(api::handle_inference_chat_runs_cancel))
-        .route("/chat/threads", get(api::handle_chat_threads_get).post(api::handle_chat_threads_post).delete(api::handle_chat_threads_delete))
-        .route("/chat/threads/:id", get(api::handle_chat_thread_detail).put(api::handle_chat_thread_update).patch(api::handle_chat_thread_update).delete(api::handle_chat_thread_delete))
-        .route("/chat/threads/:id/forks", get(api::handle_chat_thread_forks))
-        .route("/chat/threads/:id/fork", post(api::handle_chat_thread_fork))
-        .route("/chat/threads/:id/messages", get(api::handle_chat_thread_messages).post(api::handle_chat_thread_messages_post).put(api::handle_chat_thread_messages_put))
-        .route("/chat/threads/:id/messages/:msg_id", get(api::handle_chat_thread_message_detail_get).put(api::handle_chat_thread_message_detail_put).patch(api::handle_chat_thread_message_detail_put).delete(api::handle_chat_thread_message_detail_delete))
-        .route("/chat/projects", get(api::handle_chat_projects_get).post(api::handle_chat_projects_post))
-        .route("/chat/projects/:id", get(api::handle_chat_projects_detail).patch(api::handle_chat_projects_detail).delete(api::handle_chat_projects_delete))
-        .route("/chat/settings", get(api::handle_chat_settings_get).put(api::handle_chat_settings_put).post(api::handle_chat_settings_put))
-        .route("/chat/settings/compare-and-set", post(api::handle_chat_settings_put))
-        .route("/chat/count", get(api::handle_chat_count))
-        .route("/chat/attachments", get(api::handle_chat_attachments))
+        // Маршрутов /inference/chat-runs нет намеренно: получив 404, фронтенд сам переходит
+        // на обычный SSE-поток (раньше фейковые chat-runs ломали каждое сообщение ошибкой 404)
+        // История чатов в SQLite (chat_history.rs)
+        .route("/chat", delete(chat_history::clear_all))
+        .route("/chat/export", get(chat_history::export_history))
+        .route("/chat/count", get(chat_history::count_threads))
+        .route("/chat/attachments", get(chat_history::list_attachments))
+        .route("/chat/threads", get(chat_history::list_threads).post(chat_history::save_thread).delete(chat_history::delete_threads))
+        .route("/chat/threads/:id", get(chat_history::get_thread).put(chat_history::update_thread).patch(chat_history::update_thread).delete(chat_history::delete_thread))
+        .route("/chat/threads/:id/forks", get(chat_history::thread_fork_counts))
+        .route("/chat/threads/:id/fork", post(chat_history::fork_thread))
+        .route("/chat/threads/:id/messages", get(chat_history::list_messages).post(chat_history::add_message).put(chat_history::sync_messages))
+        .route("/chat/threads/:id/messages/:msg_id", get(chat_history::get_message).put(chat_history::put_message).patch(chat_history::patch_message).delete(chat_history::delete_message))
+        .route("/chat/projects", get(chat_history::list_projects).post(chat_history::save_project))
+        .route("/chat/projects/:id", get(chat_history::get_project).patch(chat_history::update_project).delete(chat_history::delete_project))
+        .route("/chat/settings", get(chat_history::get_settings).put(chat_history::put_settings).post(chat_history::put_settings))
+        .route("/chat/settings/compare-and-set", post(chat_history::compare_and_set_settings))
         // System & Hardware Endpoints
         .route("/system", get(api::handle_system))
         .route("/system/hardware", get(api::handle_system_hardware))
@@ -289,7 +292,22 @@ pub async fn run_server_with_listener(
 
     let models_dir = locations::find_models_dir();
     info!("Папка моделей: {}", models_dir.display());
-    let state = Arc::new(AppState::new(vk_ctx, models_dir, static_dir.clone()));
+
+    // История чатов и настройки хранятся в файле базы и переживают перезапуск
+    let database_path = locations::database_path();
+    let store = store::Store::open(&database_path).map_err(|err| {
+        anyhow::anyhow!(
+            "Не удалось открыть базу данных {}: {err}",
+            database_path.display()
+        )
+    })?;
+    info!("База данных: {}", database_path.display());
+    let state = Arc::new(AppState::with_store(
+        vk_ctx,
+        models_dir,
+        static_dir.clone(),
+        Arc::new(store),
+    ));
     state
         .server_port
         .store(addr.port(), std::sync::atomic::Ordering::Relaxed);

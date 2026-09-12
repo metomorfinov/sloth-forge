@@ -20,6 +20,9 @@ thiserror.workspace = true
 anyhow.workspace = true
 reqwest = { version = "0.12", features = ["json", "stream"] }
 sysinfo = "0.33"
+# Постоянное хранилище (треды, сообщения, настройки, история обучения).
+# bundled: SQLite собирается вместе с сервером, отдельная установка не нужна (и на Windows)
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.23"

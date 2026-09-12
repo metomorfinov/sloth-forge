@@ -337,16 +337,11 @@ async fn test_openai_chat_completions_json() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Раньше здесь приходила заготовленная фраза «про Vulkan» без участия модели.
+    // Пока движок инференса не подключён (этап 2), ответ — честный 503 с объяснением.
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let chat_resp: serde_json::Value = resp.json().await.unwrap();
-
-    assert_eq!(chat_resp["object"].as_str(), Some("chat.completion"));
-    let choices = chat_resp["choices"].as_array().unwrap();
-    assert_eq!(choices.len(), 1);
-    let content = choices[0]["message"]["content"].as_str().unwrap();
-    assert!(!content.is_empty());
-    assert!(content.contains("Vulkan") || content.contains("AMD"));
-    assert_eq!(choices[0]["finish_reason"].as_str(), Some("stop"));
+    assert!(chat_resp["detail"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -369,13 +364,10 @@ async fn test_openai_chat_completions_sse_streaming() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Стрим тоже не имитируется: до подключения движка — 503 в JSON, а не SSE с заготовкой
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
-    assert!(ct.contains("text/event-stream"));
-
-    let body_text = resp.text().await.unwrap();
-    assert!(body_text.contains("chat.completion.chunk"));
-    assert!(body_text.contains("[DONE]"));
+    assert!(ct.contains("application/json"));
 }
 
 #[tokio::test]
@@ -648,13 +640,8 @@ async fn test_unsloth_inference_chat_sse() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
-    assert!(ct.contains("text/event-stream"));
-
-    let body_text = resp.text().await.unwrap();
-    assert!(body_text.contains("chat.completion.chunk"));
-    assert!(body_text.contains("[DONE]"));
+    // До подключения движка (этап 2) — честный 503 вместо имитации стрима
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     // POST /api/inference/chat/completions (non-stream)
     let non_stream_payload = serde_json::json!({
@@ -671,9 +658,9 @@ async fn test_unsloth_inference_chat_sse() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let chat_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(chat_resp["object"].as_str(), Some("chat.completion"));
+    assert!(chat_resp["detail"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -1023,15 +1010,25 @@ async fn test_chat_threads_projects_and_settings() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["threads"].as_array().map(|a| a.len()), Some(0));
 
+    // Фронтенд всегда присылает id треда; без него — 400, а не выдуманный «thread-1»
     let resp = client
         .post(format!("{base_url}/api/chat/threads"))
         .json(&serde_json::json!({"title": "Test Chat"}))
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let resp = client
+        .post(format!("{base_url}/api/chat/threads"))
+        .json(&serde_json::json!({"id": "thread-a", "title": "Test Chat", "modelType": "base", "createdAt": 1}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["id"].as_str(), Some("thread-1"));
+    assert_eq!(body["id"].as_str(), Some("thread-a"));
+    assert_eq!(body["title"].as_str(), Some("Test Chat"));
 
     // Projects
     let resp = client.get(format!("{base_url}/api/chat/projects")).send().await.unwrap();
@@ -1039,13 +1036,11 @@ async fn test_chat_threads_projects_and_settings() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["projects"].as_array().map(|a| a.len()), Some(0));
 
-    // Chat Settings
+    // Chat Settings: формат фронтенда { settings: {...} }; по умолчанию настройки пусты
     let resp = client.get(format!("{base_url}/api/chat/settings")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["temperature"].as_f64(), Some(0.7));
-    assert_eq!(body["top_p"].as_f64(), Some(0.9));
-    assert_eq!(body["max_tokens"].as_u64(), Some(2048));
+    assert_eq!(body["settings"], serde_json::json!({}));
 }
 
 #[tokio::test]
@@ -1565,20 +1560,22 @@ async fn test_audited_endpoints_and_schemas() {
     // 9. Inference cancel, count tokens, monitor reset
     let resp = client.post(format!("{base_url}/api/inference/cancel")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Подсчёт токенов требует токенизатора модели: до подключения движка — 503
     let resp = client.post(format!("{base_url}/api/inference/chat/count_tokens"))
         .json(&serde_json::json!({ "messages": [{"role": "user", "content": "hello"}] }))
         .send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let resp = client.delete(format!("{base_url}/api/inference/monitor")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    // 10. Chat messages PUT & detail PUT, project PATCH
+    // 10. Chat messages PUT & detail PUT, project PATCH: несуществующие тред и проект —
+    //     честный 404, запрос без тела — ошибка клиента, а не выдуманный успех
     let resp = client.put(format!("{base_url}/api/chat/threads/th-1/messages")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     let resp = client.put(format!("{base_url}/api/chat/threads/th-1/messages/msg-1")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(resp.status().is_client_error());
     let resp = client.patch(format!("{base_url}/api/chat/projects/prj-1")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(resp.status().is_client_error());
 
     // 11. Auth API Keys
     let resp = client.get(format!("{base_url}/api/auth/api-keys")).send().await.unwrap();
@@ -1680,10 +1677,10 @@ async fn test_model_picker_and_deep_integration_audit() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Раньше «токены» считались формулой по словам; настоящий подсчёт появится с движком (этап 2)
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let count_res: serde_json::Value = resp.json().await.unwrap();
-    assert!(count_res["input_tokens"].as_u64().unwrap() > 0, "input_tokens must be reported");
-    assert_eq!(count_res["model"].as_str(), Some("Llama-3.2-1B-Instruct-Q4_K_M.gguf"));
+    assert!(count_res["detail"].as_str().is_some());
 
     // 6. Picker Chat Template: GET /api/picker/chat-template/:id
     let resp = client.get(format!("{base_url}/api/picker/chat-template/llama-3.2-1b")).send().await.unwrap();

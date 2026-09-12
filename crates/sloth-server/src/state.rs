@@ -245,23 +245,6 @@ impl Default for DownloadState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatSettingsState {
-    pub temperature: f64,
-    pub top_p: f64,
-    pub max_tokens: usize,
-}
-
-impl Default for ChatSettingsState {
-    fn default() -> Self {
-        Self {
-            temperature: 0.7,
-            top_p: 0.9,
-            max_tokens: 2048,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanFolderEntry {
     pub id: u64,
     pub path: String,
@@ -305,7 +288,6 @@ pub struct AppState {
     pub download_state: Arc<RwLock<DownloadState>>,
     pub download_cancel: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
     pub active_inference_model: Arc<RwLock<String>>,
-    pub chat_settings: Arc<RwLock<ChatSettingsState>>,
     pub vram_budget_mb: Arc<AtomicU64>,
     pub upload_limit_bytes: Arc<AtomicU64>,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
@@ -313,16 +295,30 @@ pub struct AppState {
     pub personalization: Arc<RwLock<serde_json::Value>>,
     pub model_overrides: Arc<RwLock<serde_json::Value>>,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
-    pub chat_threads: Arc<RwLock<std::collections::HashMap<String, serde_json::Value>>>,
-    pub chat_messages: Arc<RwLock<std::collections::HashMap<String, Vec<serde_json::Value>>>>,
+    /// Постоянное хранилище: история чатов, проекты, настройки, запуски обучения.
+    pub store: Arc<crate::store::Store>,
     pub model_load_progress: Arc<RwLock<LoadProgressState>>,
 }
 
 impl AppState {
+    /// Состояние с базой в памяти: для тестов, где каждая проверка начинает с чистого листа.
     pub fn new(
         vk_ctx: Option<VulkanContext>,
         models_dir: PathBuf,
         static_dir: Option<PathBuf>,
+    ) -> Self {
+        // База в памяти не открывается только при полной нехватке памяти
+        let store = crate::store::Store::open_in_memory()
+            .expect("не удалось создать базу SQLite в оперативной памяти");
+        Self::with_store(vk_ctx, models_dir, static_dir, Arc::new(store))
+    }
+
+    /// Состояние с готовым хранилищем (сервер открывает базу из файла).
+    pub fn with_store(
+        vk_ctx: Option<VulkanContext>,
+        models_dir: PathBuf,
+        static_dir: Option<PathBuf>,
+        store: Arc<crate::store::Store>,
     ) -> Self {
         let coordinator = Arc::new(ClusterCoordinator::new(NodeRole::Master, 2));
         let (tx_telemetry, _) = broadcast::channel(256);
@@ -365,7 +361,6 @@ impl AppState {
             download_state: Arc::new(RwLock::new(DownloadState::default())),
             download_cancel: Arc::new(RwLock::new(None)),
             active_inference_model: Arc::new(RwLock::new("llama-3.2-3b-instruct-q4_k_m".to_string())),
-            chat_settings: Arc::new(RwLock::new(ChatSettingsState::default())),
             vram_budget_mb: Arc::new(AtomicU64::new(4096)),
             upload_limit_bytes: Arc::new(AtomicU64::new(10737418240)),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
@@ -373,8 +368,7 @@ impl AppState {
             personalization: Arc::new(RwLock::new(default_personalization)),
             model_overrides: Arc::new(RwLock::new(serde_json::json!({}))),
             api_keys: Arc::new(RwLock::new(Vec::new())),
-            chat_threads: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            chat_messages: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            store,
             model_load_progress: Arc::new(RwLock::new(LoadProgressState::default())),
         }
     }

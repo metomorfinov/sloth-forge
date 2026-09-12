@@ -19,6 +19,9 @@ dist/
 checkpoints/
 data/raw/
 
+# Локальная база SlothForge: история чатов и настройки пользователя
+/data/
+
 # IDE & OS
 .vscode/
 .idea/
