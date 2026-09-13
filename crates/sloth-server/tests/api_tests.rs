@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::header::CONTENT_TYPE;
 use sloth_server::create_router;
+use sloth_core::cluster::StepGradients;
 use sloth_server::state::AppState;
 use sloth_vulkan_sys::VulkanContext;
 use std::path::PathBuf;
@@ -153,97 +154,158 @@ async fn test_ws_telemetry() {
     assert!(second_text.contains("\"phase\":\"idle\""), "{second_text}");
 }
 
+async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let response = client.post(url).json(&body).send().await.unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap_or(serde_json::Value::Null))
+}
+
 #[tokio::test]
 async fn test_cluster_worker_registration_and_status() {
-    let (base_url, _) = spawn_test_server().await;
+    let (base_url, state) = spawn_test_server().await;
     let client = reqwest::Client::new();
+    let register_url = format!("{base_url}/api/cluster/worker/register");
+    let worker = |id: &str, ip: &str| {
+        serde_json::json!({ "worker_id": id, "ip": ip, "gpu_name": "AMD Radeon RX 580", "vram_mb": 8192 })
+    };
 
-    // Register worker
-    let reg_payload = serde_json::json!({
-        "worker_id": "rx570-worker-02",
-        "ip": "192.168.1.105",
-        "gpu_name": "AMD Radeon RX 570",
-        "vram_mb": 4096,
-        "latency_ms": 1.15
-    });
+    let (status, ack) = post_json(&client, &register_url, worker("node-a", "192.168.1.105")).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{ack}");
+    assert_eq!(ack["rank"], 1);
+    assert_eq!(ack["worldSize"], 2);
 
-    let resp = client
-        .post(format!("{base_url}/api/cluster/worker/register"))
-        .json(&reg_payload)
+    // Повторная регистрация того же узла сохраняет ранг (раньше выдавался новый)
+    let (_, again) = post_json(&client, &register_url, worker("node-a", "192.168.1.105")).await;
+    assert_eq!(again["rank"], 1);
+    let (_, second) = post_json(&client, &register_url, worker("node-b", "192.168.1.106")).await;
+    assert_eq!(second["rank"], 2);
+    assert_eq!(second["worldSize"], 3);
+
+    let (status, _) = post_json(&client, &register_url, worker("node-c", "not-an-ip")).await;
+    assert_eq!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = post_json(
+        &client,
+        &register_url,
+        serde_json::json!({ "worker_id": "node-d", "ip": "10.0.0.5" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "выдуманных «RX 570, 4 ГБ» по умолчанию больше нет"
+    );
+
+    let heartbeat_url = format!("{base_url}/api/cluster/worker/heartbeat");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let (status, heartbeat) = post_json(
+        &client,
+        &heartbeat_url,
+        serde_json::json!({ "worker_id": "node-a", "timestamp_ms": now_ms }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{heartbeat}");
+    assert!(heartbeat["latencyMs"].is_number());
+    let (status, _) = post_json(&client, &heartbeat_url, serde_json::json!({ "worker_id": "ghost" })).await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+
+    let cluster: serde_json::Value = client
+        .get(format!("{base_url}/api/cluster/status"))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let reg_ack: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(reg_ack["status"].as_str(), Some("ok"));
-    assert_eq!(reg_ack["rank"].as_u64(), Some(1));
-    assert_eq!(reg_ack["worldSize"].as_u64().or_else(|| reg_ack["world_size"].as_u64()), Some(2));
-
-    // Verify cluster status reflects registered worker
-    let resp = client.get(format!("{base_url}/api/cluster/status")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let status: serde_json::Value = resp.json().await.unwrap();
-
-    assert_eq!(status["role"].as_str(), Some("master"));
-    assert_eq!(status["worldSize"].as_u64().or_else(|| status["world_size"].as_u64()), Some(2));
-    let workers = status["workers"].as_array().unwrap();
-    assert_eq!(workers.len(), 1);
-    assert_eq!(workers[0]["workerId"].as_str().or_else(|| workers[0]["worker_id"].as_str()), Some("rx570-worker-02"));
-    let total_vram = status["totalVramMb"].as_u64().or_else(|| status["total_vram_mb"].as_u64()).unwrap();
-    assert_eq!(total_vram, 8192); // 4096 + 4096
-    let allreduce_ready = status["allReduceReady"].as_bool().or_else(|| status["all_reduce_ready"].as_bool()).unwrap();
-    assert!(allreduce_ready);
+    assert_eq!(cluster["role"], "master");
+    assert_eq!(cluster["worldSize"], 3);
+    assert_eq!(cluster["onlineWorkers"], 2);
+    let ranks: Vec<u64> = cluster["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|worker| worker["rank"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ranks, [1, 2]);
+    assert_eq!(cluster["allReduceReady"], false, "без движка обучения AllReduce не готов");
+    assert!(cluster.get("masterIp").is_none(), "выдуманного адреса мастера больше нет");
+    if state.vk_ctx.is_some() {
+        // Видеопамять мастера — настоящая, а не зашитые 4096 МБ
+        let master = cluster["masterVramMb"].as_u64().unwrap();
+        assert_eq!(cluster["totalVramMb"].as_u64(), Some(master + 16384));
+    }
 }
 
 #[tokio::test]
 async fn test_cluster_sync_grad_json_and_binary() {
-    let (base_url, _) = spawn_test_server().await;
+    let (base_url, state) = spawn_test_server().await;
     let client = reqwest::Client::new();
+    let url = format!("{base_url}/api/cluster/sync_grad");
+    let binary = |values: &[f32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
 
-    // 1. JSON Sync
-    let json_payload = serde_json::json!({
-        "step": 42,
-        "rank": 2,
-        "worker_id": "rx570-worker-02",
-        "gradients": [1.0, 2.0, 3.0, 4.0]
+    // Без движка обучения у мастера нет градиентов: честный 409 вместо подмены на 0,01
+    let (status, body) = post_json(&client, &url, serde_json::json!({ "step": 42, "gradients": [1.0, 2.0] })).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+
+    *state.master_gradients.write().await = Some(StepGradients {
+        step: 42,
+        gradients: vec![1.0, 2.0, 3.0, 4.0],
     });
 
-    let resp = client
-        .post(format!("{base_url}/api/cluster/sync_grad"))
-        .json(&json_payload)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let sync_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(sync_resp["status"].as_str(), Some("ok"));
-    let grads = sync_resp["gradients"].as_array().unwrap();
-    assert_eq!(grads.len(), 4);
-
-    // 2. Binary Sync (application/octet-stream)
-    let raw_floats: Vec<f32> = vec![0.5, 1.5, 2.5, 3.5];
-    let mut bytes = Vec::new();
-    for f in &raw_floats {
-        bytes.extend_from_slice(&f.to_le_bytes());
-    }
-
-    let resp = client
-        .post(format!("{base_url}/api/cluster/sync_grad"))
-        .header(CONTENT_TYPE, "application/octet-stream")
-        .body(bytes)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let (status, synced) = post_json(
+        &client,
+        &url,
+        serde_json::json!({ "step": 42, "worker_id": "node-a", "gradients": [3.0, 2.0, 5.0, 0.0] }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{synced}");
+    assert_eq!(synced["gradients"], serde_json::json!([2.0, 2.0, 4.0, 2.0]));
     assert_eq!(
-        resp.headers().get(CONTENT_TYPE).unwrap(),
-        "application/octet-stream"
+        state.master_gradients.read().await.as_ref().unwrap().gradients,
+        vec![1.0, 2.0, 3.0, 4.0],
+        "мастер-копия не перезаписана"
     );
-    let resp_bytes = resp.bytes().await.unwrap();
-    assert_eq!(resp_bytes.len(), 16); // 4 floats * 4 bytes
+
+    let (status, _) = post_json(&client, &url, serde_json::json!({ "step": 42, "gradients": [1.0, 2.0] })).await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "другая длина — 400");
+    let (status, _) = post_json(&client, &url, serde_json::json!({ "step": 7, "gradients": [1.0, 2.0, 3.0, 4.0] })).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "другой шаг — 409");
+
+    let resp = client
+        .post(&url)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header("x-sloth-step", "42")
+        .body(binary(&[0.5, 1.5, 2.5, 3.5]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.headers().get(CONTENT_TYPE).unwrap(), "application/octet-stream");
+    let bytes = resp.bytes().await.unwrap();
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty(), "ответ — целое число float32");
+    let averaged: Vec<f32> = chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect();
+    assert_eq!(averaged, [0.75, 1.75, 2.75, 3.75]);
+
+    for (payload, why) in [
+        (vec![0u8; 15], "неполный float32"),
+        (binary(&[f32::NAN, 1.0, 2.0, 3.0]), "NaN"),
+    ] {
+        let resp = client
+            .post(&url)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(payload)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{why}");
+    }
 }
 
 #[tokio::test]

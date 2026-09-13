@@ -87,7 +87,8 @@ pub struct AppState {
     pub server_port: std::sync::atomic::AtomicU16,
     /// Сигнал мягкой остановки сервера (кнопка «Остановить» в интерфейсе, POST /api/shutdown).
     pub shutdown: tokio::sync::Notify,
-    pub master_gradients: Arc<RwLock<Vec<f32>>>,
+    /// Градиенты мастера текущего шага (выставляет движок обучения; до этапа 3 их нет).
+    pub master_gradients: Arc<RwLock<Option<sloth_core::cluster::StepGradients>>>,
     /// Задания загрузки моделей: у каждой пары «репозиторий + вариант» своё.
     pub downloads: crate::downloads::DownloadRegistry,
     /// Адрес Hugging Face (`HF_ENDPOINT`); тесты подменяют его локальным сервером.
@@ -121,7 +122,7 @@ impl AppState {
         store: Arc<crate::store::Store>,
     ) -> Self {
         let coordinator = Arc::new(ClusterCoordinator::new(NodeRole::Master, 2));
-        let master_gradients = Arc::new(RwLock::new(vec![0.0f32; 1024 * 64]));
+        let master_gradients = Arc::new(RwLock::new(None));
 
         Self {
             vk_ctx,

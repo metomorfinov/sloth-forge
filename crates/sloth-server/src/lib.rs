@@ -182,6 +182,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/hardware", get(handle_hardware))
         // Cluster Endpoints
         .route("/cluster/worker/register", post(cluster::handle_register_worker))
+        .route("/cluster/worker/heartbeat", post(cluster::handle_worker_heartbeat))
         .route("/cluster/sync_grad", post(cluster::handle_sync_grad))
         .route("/cluster/status", get(cluster::handle_cluster_status))
         // Settings & Credentials Endpoints
@@ -326,7 +327,8 @@ pub async fn run_server_with_listener(
     let app = create_router(Arc::clone(&state), static_dir);
 
     info!("SlothForge Axum server listening on http://{}", addr);
-    axum::serve(listener, app)
+    // Адрес соединения нужен кластеру: IP узла берётся из подключения, а не из слов клиента
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal(state))
         .await?;
     info!("Сервер остановлен");
