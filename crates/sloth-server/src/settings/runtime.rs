@@ -335,7 +335,8 @@ fn hf_token_json(token: Option<String>) -> Json<Value> {
     Json(json!({ "has_token": token.is_some(), "token": token }))
 }
 
-async fn stored_hf_token(state: &AppState) -> ApiResult<Option<String>> {
+/// Сохранённый токен Hugging Face (используется и загрузчиком моделей).
+pub(crate) async fn stored_hf_token(state: &AppState) -> ApiResult<Option<String>> {
     Ok(read_value(state, HF_TOKEN_KEY)
         .await?
         .and_then(|value| value.as_str().map(str::to_string))

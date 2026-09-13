@@ -2,6 +2,7 @@ pub mod api;
 pub mod chat;
 pub mod chat_history;
 pub mod cluster;
+pub mod downloads;
 pub mod error;
 pub mod handlers;
 pub mod hub;
@@ -74,13 +75,13 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/models/scan-folders/:id", delete(hub::handle_hub_delete_scan_folder))
         .route("/models/recommended-folders", get(api::handle_models_recommended_folders))
         .route("/models/loras", get(api::handle_models_loras))
-        .route("/models/download-progress", get(hub::handle_download_progress))
-        .route("/models/gguf-download-progress", get(hub::handle_gguf_download_progress))
+        .route("/models/download-progress", get(downloads::download_progress))
+        .route("/models/gguf-download-progress", get(downloads::gguf_download_progress))
         .route("/models/gguf-variants", get(hub::handle_gguf_variants))
-        .route("/models/download", post(hub::handle_download_start))
-        .route("/models/download/cancel", post(hub::handle_download_cancel))
-        .route("/models/download-status", get(hub::handle_download_status))
-        .route("/models/transport-status", get(hub::handle_transport_status))
+        .route("/models/download", post(downloads::start_download))
+        .route("/models/download/cancel", post(downloads::cancel_download))
+        .route("/models/download-status", get(downloads::download_status))
+        .route("/models/transport-status", get(downloads::transport_status))
         .route("/models/check-vision/:id", get(api::handle_check_vision))
         .route("/models/check-embedding/:id", get(api::handle_check_embedding))
         .route("/models/config/:id", get(api::handle_model_config))
@@ -88,18 +89,19 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/picker/validate-chat-template", post(api::handle_picker_validate_chat_template))
         .route("/picker/chat-template/:id", get(api::handle_picker_chat_template))
         // Hub & Model Downloading
-        .route("/hub/transport-status", get(hub::handle_transport_status))
+        // Загрузки моделей: реестр заданий, докачка, прогресс (downloads.rs)
+        .route("/hub/transport-status", get(downloads::transport_status))
         .route("/hub/cached-models", get(hub::handle_cached_models))
         .route("/hub/cached-gguf", get(hub::handle_cached_gguf))
         .route("/hub/local", get(hub::handle_hub_local))
         .route("/hub/hidden-models", get(hub::handle_hidden_models))
-        .route("/hub/active-downloads", get(hub::handle_active_downloads))
+        .route("/hub/active-downloads", get(downloads::active_downloads))
         .route("/hub/gguf-variants", get(hub::handle_gguf_variants))
-        .route("/hub/download", post(hub::handle_download_start))
-        .route("/hub/download/cancel", post(hub::handle_download_cancel))
-        .route("/hub/download-status", get(hub::handle_download_status))
-        .route("/hub/download-progress", get(hub::handle_download_progress))
-        .route("/hub/gguf-download-progress", get(hub::handle_gguf_download_progress))
+        .route("/hub/download", post(downloads::start_download))
+        .route("/hub/download/cancel", post(downloads::cancel_download))
+        .route("/hub/download-status", get(downloads::download_status))
+        .route("/hub/download-progress", get(downloads::download_progress))
+        .route("/hub/gguf-download-progress", get(downloads::gguf_download_progress))
         .route("/hub/delete-cached", post(hub::handle_delete_cached).delete(hub::handle_delete_cached))
         .route("/hub/scan-folders", get(hub::handle_hub_scan_folders).post(hub::handle_hub_add_scan_folder))
         .route("/hub/scan-folders/:id", delete(hub::handle_hub_delete_scan_folder))

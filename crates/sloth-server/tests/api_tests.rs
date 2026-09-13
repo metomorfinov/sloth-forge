@@ -911,61 +911,54 @@ async fn test_hub_model_download_lifecycle() {
     let (base_url, _) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // 1. Initial download-status is idle
+    // Сама загрузка проверяется в downloads_tests.rs на имитации Hugging Face;
+    // здесь — только ответы без сети.
+
+    // 1. Незнакомый вариант: нет ни задания, ни файлов
     let resp = client
-        .get(format!("{base_url}/api/hub/download-status"))
+        .get(format!("{base_url}/api/hub/download-status?repo_id=unsloth/Nothing-GGUF&gguf_variant=Q4_K_M"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["state"].as_str(), Some("idle"));
-    assert_eq!(body["percent"].as_f64(), Some(0.0));
-    assert_eq!(body["downloaded_bytes"].as_u64(), Some(0));
-    assert_eq!(body["total_bytes"].as_u64(), Some(0));
+    assert!(body["error"].is_null());
 
-    // 2. Start download
-    let start_payload = serde_json::json!({
-        "repo_id": "unsloth/Llama-3.2-3B-Instruct-GGUF",
-        "gguf_variant": "Q4_K_M"
-    });
+    // 2. Некорректный repo_id отклоняется до обращения к сети
     let resp = client
         .post(format!("{base_url}/api/hub/download"))
-        .json(&start_payload)
+        .json(&serde_json::json!({ "repo_id": "../etc", "gguf_variant": "Q4_K_M" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let start_res: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(start_res["state"].as_str(), Some("running"));
-    assert_eq!(start_res["accepted"].as_bool(), Some(true));
-    assert_eq!(start_res["job_key"].as_str(), Some("job-default"));
-    assert_eq!(start_res["generation"].as_u64(), Some(1));
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["detail"].is_string());
 
-    // 3. Check progress
+    // 3. Прогресс без загрузки: ноль, а не выдуманный размер
     let resp = client
-        .get(format!("{base_url}/api/hub/download-progress"))
+        .get(format!("{base_url}/api/hub/download-progress?repo_id=unsloth/Nothing-GGUF"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let prog: serde_json::Value = resp.json().await.unwrap();
-    assert!(prog["expected_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(prog["downloaded_bytes"].as_u64(), Some(0));
+    assert_eq!(prog["progress"].as_f64(), Some(0.0));
+    assert_eq!(prog["complete_on_disk"].as_bool(), Some(false));
 
-    // 4. Cancel download
-    let cancel_payload = serde_json::json!({
-        "job_key": "job-default"
-    });
+    // 4. Отмена несуществующего задания ничего не ломает
     let resp = client
         .post(format!("{base_url}/api/hub/download/cancel"))
-        .json(&cancel_payload)
+        .json(&serde_json::json!({ "repo_id": "unsloth/Nothing-GGUF", "gguf_variant": "Q4_K_M", "generation": 1 }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let cancel_res: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(cancel_res["job_key"].as_str(), Some("job-default"));
-    assert_eq!(cancel_res["state"].as_str(), Some("cancelled"));
+    assert_eq!(cancel_res["state"].as_str(), Some("idle"));
+    assert!(cancel_res["job_key"].is_string());
 }
 
 #[tokio::test]
@@ -1185,12 +1178,10 @@ async fn test_hub_transport_statuses() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"].as_str(), Some("idle"));
-    assert_eq!(body["transport"].as_str(), Some("direct"));
-    assert_eq!(body["active"].as_bool(), Some(false));
     assert_eq!(body["has_partial"].as_bool(), Some(false));
     assert!(body["last_transport"].is_null());
-    assert_eq!(body["resumable"].as_bool(), Some(false));
+    // Загрузка по HTTP всегда умеет продолжать .part-файлы
+    assert_eq!(body["resumable"].as_bool(), Some(true));
 
     // 2. GET /api/hub/datasets/transport-status
     let resp = client
@@ -1373,76 +1364,9 @@ async fn test_hub_scan_folders_crud() {
     assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(0));
 }
 
-#[tokio::test]
-async fn test_model_download_flexible_payload() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // Flexible payload using camelCase and alternate names:
-    // repoId instead of repo_id, quant instead of gguf_variant, file_name instead of filename,
-    // revision, transportMode, useXet
-    let flex_payload = serde_json::json!({
-        "repoId": "unsloth/Llama-3.2-3B-Instruct-GGUF",
-        "quant": "Q4_K_M",
-        "file_name": "model-Q4_K_M.gguf",
-        "revision": "main",
-        "transportMode": "http",
-        "useXet": false,
-        "scopeId": null
-    });
-
-    let resp = client
-        .post(format!("{base_url}/api/hub/download"))
-        .json(&flex_payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(start_resp["state"].as_str(), Some("running"));
-    assert_eq!(start_resp["accepted"].as_bool(), Some(true));
-    assert_eq!(start_resp["job_key"].as_str(), Some("job-default"));
-    assert_eq!(start_resp["generation"].as_u64(), Some(1));
-    assert_eq!(start_resp["transport"].as_str(), Some("http"));
-
-    // Check download status
-    let resp = client
-        .get(format!("{base_url}/api/hub/download-status?repo_id=unsloth/Llama-3.2-3B-Instruct-GGUF&gguf_variant=Q4_K_M"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let status_resp: serde_json::Value = resp.json().await.unwrap();
-    assert!(status_resp["state"].as_str().is_some());
-    assert!(status_resp["error"].is_null());
-
-    // Check download progress
-    let resp = client
-        .get(format!("{base_url}/api/hub/download-progress?repo_id=unsloth/Llama-3.2-3B-Instruct-GGUF"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let prog_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(prog_resp["cache_measured"].as_bool(), Some(true));
-    assert!(prog_resp["expected_bytes"].as_u64().unwrap() > 0);
-
-    // Cancel with flexible payload
-    let cancel_payload = serde_json::json!({
-        "repo_id": "unsloth/Llama-3.2-3B-Instruct-GGUF",
-        "gguf_variant": "Q4_K_M",
-        "generation": 1
-    });
-    let resp = client
-        .post(format!("{base_url}/api/hub/download/cancel"))
-        .json(&cancel_payload)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let cancel_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(cancel_resp["state"].as_str(), Some("cancelled"));
-}
+// Старый test_model_download_flexible_payload качал настоящую 2-ГБ модель с Hugging Face
+// и проверял общий слот job-default; полный запрос фронтенда теперь проверяется
+// в downloads_tests.rs (downloads_all_shards_into_repo_folder) без сети.
 
 #[tokio::test]
 async fn test_hub_token_validate_and_dataset_utils() {

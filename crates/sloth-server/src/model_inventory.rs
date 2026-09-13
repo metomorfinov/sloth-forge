@@ -35,12 +35,50 @@ pub struct LocalModel {
     pub modified_secs: Option<u64>,
     /// Индекс корня, в котором найдена модель: 0 — основная папка моделей, дальше scan-folders.
     pub root_index: usize,
+    /// Путь первого файла относительно корня (`unsloth/Llama-GGUF/Q4_K_M/файл.gguf`).
+    pub relative_path: PathBuf,
 }
 
 impl LocalModel {
     /// Идентификатор для API — полный путь: он однозначен и проходит песочницу путей.
     pub fn id(&self) -> String {
         self.path.to_string_lossy().into_owned()
+    }
+
+    fn relative_parts(&self) -> Vec<String> {
+        self.relative_path
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Репозиторий Hugging Face: из папок `<org>/<repo>/…` (так раскладывает загрузчик),
+    /// иначе — догадка по имени файла.
+    pub fn repo_id(&self) -> String {
+        let parts = self.relative_parts();
+        if parts.len() >= 3 {
+            format!("{}/{}", parts[0], parts[1])
+        } else {
+            crate::hub::infer_repo_id_from_gguf_filename(&self.file_name)
+        }
+    }
+
+    /// Путь первого файла внутри репозитория (`Q4_K_M/файл.gguf`) или просто имя файла.
+    pub fn path_in_repo(&self) -> String {
+        let parts = self.relative_parts();
+        if parts.len() >= 3 {
+            parts[2..].join("/")
+        } else {
+            self.file_name.clone()
+        }
+    }
+
+    /// Вариант квантования по пути внутри репозитория.
+    pub fn quant(&self) -> String {
+        crate::hub::extract_quant_from_path(&self.path_in_repo())
     }
 }
 
@@ -87,13 +125,14 @@ pub fn scan_models(roots: &[PathBuf]) -> Vec<LocalModel> {
         let Ok(root) = root.canonicalize() else {
             continue;
         };
-        walk(&root, 0, root_index, &mut seen, &mut models, &mut budget);
+        walk(&root, &root, 0, root_index, &mut seen, &mut models, &mut budget);
     }
     models.sort_by_key(|model| model.display_name.to_lowercase());
     models
 }
 
 fn walk(
+    root: &Path,
     dir: &Path,
     depth: usize,
     root_index: usize,
@@ -132,7 +171,7 @@ fn walk(
         };
         if file_type.is_dir() {
             if depth < MAX_SCAN_DEPTH {
-                walk(&entry.path(), depth + 1, root_index, seen, models, budget);
+                walk(root, &entry.path(), depth + 1, root_index, seen, models, budget);
             }
         } else if file_type.is_file() && is_gguf_name(&name) && !is_projector_name(&name) {
             files.push((name, entry.path()));
@@ -169,6 +208,10 @@ fn walk(
             .filter_map(|shard| fs::metadata(shard).ok())
             .fold(0u64, |sum, meta| sum.saturating_add(meta.len()));
         models.push(LocalModel {
+            relative_path: canonical
+                .strip_prefix(root)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|_| PathBuf::from(name)),
             complete: shard_paths.len() == expected_shards,
             modified_secs: modified_secs(&canonical),
             path: canonical,

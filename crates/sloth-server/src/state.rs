@@ -216,35 +216,6 @@ impl TrainingSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadState {
-    pub job_key: String,
-    pub generation: u64,
-    pub state: String,
-    pub percent: f32,
-    pub downloaded_bytes: u64,
-    pub total_bytes: u64,
-    pub repo_id: String,
-    pub variant: String,
-    pub filename: String,
-}
-
-impl Default for DownloadState {
-    fn default() -> Self {
-        Self {
-            job_key: "job-default".to_string(),
-            generation: 1,
-            state: "idle".to_string(),
-            percent: 0.0,
-            downloaded_bytes: 0,
-            total_bytes: 0,
-            repo_id: String::new(),
-            variant: String::new(),
-            filename: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanFolderEntry {
     pub id: u64,
     pub path: String,
@@ -266,8 +237,10 @@ pub struct AppState {
     pub shutdown: tokio::sync::Notify,
     pub master_gradients: Arc<RwLock<Vec<f32>>>,
     pub training_mutex: Arc<Mutex<()>>,
-    pub download_state: Arc<RwLock<DownloadState>>,
-    pub download_cancel: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
+    /// Задания загрузки моделей: у каждой пары «репозиторий + вариант» своё.
+    pub downloads: crate::downloads::DownloadRegistry,
+    /// Адрес Hugging Face (`HF_ENDPOINT`); тесты подменяют его локальным сервером.
+    pub hf_endpoint: String,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
     pub gguf_variants_cache: Arc<RwLock<std::collections::HashMap<String, (Instant, serde_json::Value)>>>,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
@@ -310,8 +283,10 @@ impl AppState {
             shutdown: tokio::sync::Notify::new(),
             master_gradients,
             training_mutex: Arc::new(Mutex::new(())),
-            download_state: Arc::new(RwLock::new(DownloadState::default())),
-            download_cancel: Arc::new(RwLock::new(None)),
+            downloads: crate::downloads::DownloadRegistry::default(),
+            hf_endpoint: std::env::var(crate::downloads::HF_ENDPOINT_ENV)
+                .map(|endpoint| endpoint.trim_end_matches('/').to_string())
+                .unwrap_or_else(|_| crate::downloads::DEFAULT_HF_ENDPOINT.to_string()),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
             gguf_variants_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             api_keys: Arc::new(RwLock::new(Vec::new())),

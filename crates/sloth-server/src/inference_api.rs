@@ -65,7 +65,7 @@ async fn scan(state: &AppState) -> ApiResult<Vec<LocalModel>> {
 }
 
 fn repo_id_of(model: &LocalModel) -> String {
-    crate::hub::infer_repo_id_from_gguf_filename(&model.file_name)
+    model.repo_id()
 }
 
 async fn resolve_model(
@@ -98,7 +98,7 @@ async fn resolve_model(
         let found = models.iter().find(|model| {
             repo_id_of(model).eq_ignore_ascii_case(identifier)
                 && variant.is_none_or(|v| {
-                    crate::hub::extract_quant_from_path(&model.file_name).eq_ignore_ascii_case(v)
+                    model.quant().eq_ignore_ascii_case(v)
                 })
         });
         return Ok(match found {
