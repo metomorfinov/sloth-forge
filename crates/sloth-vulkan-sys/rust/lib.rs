@@ -4,6 +4,10 @@ pub mod wrapper;
 pub use ffi::*;
 pub use wrapper::*;
 
+/// С чем собран крейт: `vulkan` (настоящий Vulkan-слой) или `stub` (CPU-заглушка без
+/// видеокарты). Выбирает build.rs, см. переменную `SLOTH_VULKAN`.
+pub const BACKEND: &str = env!("SLOTH_VK_BACKEND");
+
 #[cfg(test)]
 mod tests {
     use super::*;

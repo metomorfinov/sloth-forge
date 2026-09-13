@@ -1,7 +1,13 @@
 #include "vk_pipeline.h"
 #include "vk_context.h"
-#include "spv_embedded.h"
 #include "sloth_vulkan.h"
+// build.rs компилирует шейдеры из shaders/*.comp при каждой сборке, если найден glslangValidator;
+// иначе используются копии, сохранённые в репозитории (src/spv_embedded.h).
+#ifdef SLOTH_VK_GENERATED_SPV
+#include <spv_embedded_generated.h>
+#else
+#include "spv_embedded.h"
+#endif
 
 #include <fstream>
 #include <iostream>

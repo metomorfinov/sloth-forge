@@ -8,7 +8,11 @@
 extern "C" {
 #endif
 
-#if defined(_WIN32) || defined(__CYGWIN__)
+/* SLOTH_VK_STATIC: библиотека встраивается в программу статически (так её собирает build.rs),
+   поэтому на Windows не нужны dllimport/dllexport. */
+#if defined(SLOTH_VK_STATIC)
+  #define SLOTH_VK_API
+#elif defined(_WIN32) || defined(__CYGWIN__)
   #if defined(SLOTH_VK_BUILD_SHARED)
     #define SLOTH_VK_API __declspec(dllexport)
   #else

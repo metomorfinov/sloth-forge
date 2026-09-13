@@ -42,23 +42,13 @@ jobs:
           npm run build
           cd ..
 
-      - name: Compile SPIR-V Compute Shaders
-        shell: pwsh
-        run: |
-          cd crates/sloth-vulkan-sys
-          ./build.ps1 -CompileShadersOnly
-          cd ../..
-
-      - name: Build Windows C++ Vulkan Shared Library
-        shell: pwsh
-        run: |
-          cd crates/sloth-vulkan-sys
-          mkdir -p bin
-          cl.exe /O2 /EHsc /std:c++20 /LD src/vk_context.cpp src/vk_buffer.cpp src/vk_pipeline.cpp src/sloth_vulkan_api.cpp /Iinclude /I"$env:VULKAN_SDK/Include" /link /LIBPATH:"$env:VULKAN_SDK/Lib" vulkan-1.lib /OUT:bin/libsloth_vulkan.dll
-          cd ../..
-
+      # Шейдеры и C++-слой Vulkan компилирует build.rs крейта sloth-vulkan-sys и встраивает
+      # в sloth-server.exe. SLOTH_VULKAN=native: без Vulkan SDK сборка падает, а не выпускает
+      # релиз с CPU-заглушкой (раньше так и происходило: собранная DLL не подключалась).
       - name: Build Rust Sloth-Server Binary
         shell: pwsh
+        env:
+          SLOTH_VULKAN: native
         run: |
           cargo build --release --target x86_64-pc-windows-msvc -p sloth-server
 
@@ -67,9 +57,6 @@ jobs:
         run: |
           mkdir -p dist-windows/SlothForge
           cp target/x86_64-pc-windows-msvc/release/sloth-server.exe dist-windows/SlothForge/
-          if (Test-Path "crates/sloth-vulkan-sys/bin/libsloth_vulkan.dll") {
-            cp crates/sloth-vulkan-sys/bin/libsloth_vulkan.dll dist-windows/SlothForge/
-          }
           cp -r frontend/dist dist-windows/SlothForge/frontend-dist
           mkdir -p dist-windows/SlothForge/models
           "Put your .gguf models here." | Out-File -Encoding utf8 dist-windows/SlothForge/models/README.txt
