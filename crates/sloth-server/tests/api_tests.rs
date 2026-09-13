@@ -38,29 +38,30 @@ async fn spawn_test_server() -> (String, Arc<AppState>) {
 #[tokio::test]
 async fn test_get_vram() {
     let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
+    let resp = reqwest::Client::new()
         .get(format!("{base_url}/api/vram"))
         .send()
         .await
         .expect("Failed to call /api/vram");
 
+    // Без видеокарты или без данных о занятости — честный 503 вместо выдуманных «1420 МБ»
+    if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["detail"].is_string());
+        return;
+    }
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let vram: serde_json::Value = resp.json().await.unwrap();
-
-    assert!(vram["deviceName"].as_str().is_some() || vram["device_name"].as_str().is_some());
-    let total_mb = vram["totalMb"].as_u64().or_else(|| vram["total_mb"].as_u64()).unwrap();
-    assert!(total_mb >= 4096);
-    let used_mb = vram["usedMb"].as_u64().or_else(|| vram["used_mb"].as_u64()).unwrap();
-    let free_mb = vram["freeMb"].as_u64().or_else(|| vram["free_mb"].as_u64()).unwrap();
-    assert!(free_mb > 0);
-    assert!(total_mb >= used_mb);
+    let total = vram["total_bytes"].as_u64().unwrap();
+    let used = vram["used_bytes"].as_u64().unwrap();
+    let free = vram["free_bytes"].as_u64().unwrap();
+    assert!(total > 0 && used <= total);
+    assert_eq!(free, total - used);
 }
 
 #[tokio::test]
 async fn test_get_hardware() {
-    let (base_url, _) = spawn_test_server().await;
+    let (base_url, state) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -68,22 +69,39 @@ async fn test_get_hardware() {
         .send()
         .await
         .expect("Failed to call /api/hardware");
-
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let hw: serde_json::Value = resp.json().await.unwrap();
 
-    // Verify GPU details: AMD Radeon RX 570, Vulkan 1.4, wavefront 64, GCN 4.0
-    let gpu_name = hw["gpuName"].as_str().or_else(|| hw["gpu_name"].as_str()).unwrap();
-    assert!(gpu_name.contains("AMD Radeon RX 570"));
+    assert_eq!(hw["vulkanAvailable"].as_bool(), Some(state.vk_ctx.is_some()));
+    if state.vk_ctx.is_some() {
+        assert!(!hw["gpuName"].as_str().unwrap_or_default().is_empty());
+        assert!(hw["vramTotalMb"].as_u64().unwrap_or(0) > 0);
+    }
+    // Выдуманных «GCN 4.0», «wavefront 64» и «Mesa 24.0.0» больше нет
+    assert!(hw.get("architecture").is_none());
+    assert!(hw.get("wavefrontSize").is_none());
+    assert!(hw.get("driver").is_none());
 
-    let vulkan_ver = hw["vulkanVersion"].as_str().or_else(|| hw["vulkan_version"].as_str()).unwrap();
-    assert!(vulkan_ver.contains("1.4"));
-
-    let wavefront = hw["wavefrontSize"].as_u64().or_else(|| hw["wavefront_size"].as_u64()).unwrap();
-    assert_eq!(wavefront, 64);
-
-    let arch = hw["architecture"].as_str().unwrap();
-    assert!(arch.contains("GCN 4.0"));
+    // Панель GPU во время обучения читает /api/train/hardware в формате GpuUtilization
+    let util: serde_json::Value = client
+        .get(format!("{base_url}/api/train/hardware"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for key in [
+        "available",
+        "gpu_utilization_pct",
+        "temperature_c",
+        "vram_used_gb",
+        "vram_total_gb",
+        "power_draw_w",
+        "power_limit_w",
+    ] {
+        assert!(util.get(key).is_some(), "нет поля {key}: {util}");
+    }
 }
 
 #[tokio::test]
@@ -320,15 +338,18 @@ async fn test_unsloth_health_endpoint() {
 
     assert_eq!(health["status"].as_str(), Some("ok"));
     assert_eq!(health["version"].as_str(), Some("0.1.0"));
-    assert_eq!(health["device_type"].as_str(), Some("vulkan"));
-    let gpu_name = health["gpu_name"].as_str().unwrap();
-    assert!(gpu_name.contains("AMD Radeon RX 570"));
-    assert_eq!(health["vram_total_mb"].as_u64(), Some(4096));
-    assert_eq!(health["vram_free_mb"].as_u64(), Some(4096));
-    assert_eq!(health["vram_used_mb"].as_u64(), Some(0));
+    // device_type — платформа сервера, как её понимает фронтенд (mac / windows / linux)
+    let expected_platform = if cfg!(target_os = "macos") { "mac" } else { std::env::consts::OS };
+    assert_eq!(health["device_type"].as_str(), Some(expected_platform));
     assert_eq!(health["cuda_available"].as_bool(), Some(false));
     assert_eq!(health["rocm_available"].as_bool(), Some(false));
-    assert_eq!(health["vulkan_available"].as_bool(), Some(true));
+    // Имя и видеопамять — от настоящего устройства, если Vulkan есть; иначе null
+    if health["vulkan_available"].as_bool() == Some(true) {
+        assert!(!health["gpu_name"].as_str().unwrap_or_default().is_empty());
+        assert!(health["vram_total_mb"].as_u64().unwrap_or(0) > 0);
+    } else {
+        assert!(health["gpu_name"].is_null());
+    }
     assert_eq!(health["chat_only"].as_bool(), Some(false));
 
     let capabilities = health["capabilities"].as_array().expect("capabilities array");
@@ -907,17 +928,17 @@ async fn test_settings_and_studio_export_endpoints() {
     let resp = client.get(format!("{base_url}/api/system")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let gpu_dev = &body["gpu"]["devices"][0];
-    assert!(gpu_dev["name"].as_str().unwrap().contains("AMD Radeon RX 570"));
-    assert!(gpu_dev["gpu_name"].as_str().unwrap().contains("AMD Radeon RX 570"));
-    assert_eq!(gpu_dev["memory_total_gb"].as_f64(), Some(4.0));
-    assert_eq!(gpu_dev["vram_total_gb"].as_f64(), Some(4.0));
-    assert_eq!(gpu_dev["backend"].as_str(), Some("vulkan"));
-
-    let inf_gpu_dev = &body["inference_gpu"]["devices"][0];
-    assert!(inf_gpu_dev["name"].as_str().unwrap().contains("AMD Radeon RX 570"));
-    assert!(inf_gpu_dev["gpu_name"].as_str().unwrap().contains("AMD Radeon RX 570"));
-    assert_eq!(inf_gpu_dev["memory_total_gb"].as_f64(), Some(4.0));
+    // Видеокарта настоящая (имя и объём от Vulkan и драйвера), без зашитой RX 570 на 4 ГБ
+    if body["gpu"]["available"].as_bool() == Some(true) {
+        let gpu_dev = &body["gpu"]["devices"][0];
+        assert!(!gpu_dev["name"].as_str().unwrap_or_default().is_empty());
+        assert!(gpu_dev["memory_total_gb"].as_f64().unwrap_or(0.0) > 0.0);
+        assert_eq!(gpu_dev["index_kind"].as_str(), Some("vulkan"));
+        assert_eq!(body["device_backend"].as_str(), Some("vulkan"));
+        assert_eq!(body["inference_gpu"]["devices"][0]["name"], gpu_dev["name"]);
+    } else {
+        assert_eq!(body["gpu"]["devices"].as_array().map(Vec::len), Some(0));
+    }
 
     // RAG knowledge bases: формат фронтенда (camelCase) и честный признак недоступности RAG
     let resp = client.get(format!("{base_url}/api/rag/knowledge-bases")).send().await.unwrap();
@@ -1210,10 +1231,11 @@ async fn test_audited_endpoints_and_schemas() {
     let resp = client.get(format!("{base_url}/api/system/hardware")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let hw: serde_json::Value = resp.json().await.unwrap();
-    assert!(hw["gpu"]["gpu_name"].is_string());
-    assert!(hw["gpu"]["vram_total_gb"].is_number());
-    assert!(hw["versions"]["vulkan"].is_string());
-    assert!(hw["export_supported"].is_boolean());
+    assert!(hw["gpu"]["gpu_name"].is_string() || hw["gpu"]["gpu_name"].is_null());
+    assert!(hw["gpu"]["vram_total_gb"].is_number() || hw["gpu"]["vram_total_gb"].is_null());
+    assert!(hw["versions"].is_object());
+    // Экспорт появится на этапе 3: интерфейс не должен предлагать его раньше
+    assert_eq!(hw["export_supported"].as_bool(), Some(false));
 
     // 2. Personalization schema check
     let resp = client.get(format!("{base_url}/api/settings/personalization")).send().await.unwrap();

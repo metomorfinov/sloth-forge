@@ -13,10 +13,10 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub device_type: String,
-    pub gpu_name: String,
-    pub vram_total_mb: u64,
-    pub vram_free_mb: u64,
-    pub vram_used_mb: u64,
+    pub gpu_name: Option<String>,
+    pub vram_total_mb: Option<u64>,
+    pub vram_free_mb: Option<u64>,
+    pub vram_used_mb: Option<u64>,
     pub cuda_available: bool,
     pub rocm_available: bool,
     pub vulkan_available: bool,
@@ -37,26 +37,20 @@ pub struct HealthResponse {
 }
 
 pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    // Настоящие числа видеопамяти — шаг 10 (VK_EXT_memory_budget); оценка
-    // «VRAM под обучение» из имитации обучения больше не подставляется
-    let vram_total_mb = 4096u64;
-    let vram_used_mb = 0u64;
-    let vram_free_mb = vram_total_mb.saturating_sub(vram_used_mb);
+    use crate::telemetry::{self, bytes_to_mib};
 
-    let gpu_name = state
-        .vk_ctx
-        .as_ref()
-        .map(|c| c.device_name().to_string())
-        .unwrap_or_else(|| "Vulkan-устройство не найдено".to_string());
+    // Имя и видеопамять — от настоящего устройства; чего не узнать, то null
+    let gpu = telemetry::collect_for(&state).await;
 
     Json(HealthResponse {
         status: "ok".to_string(),
         version: "0.1.0".to_string(),
-        device_type: "vulkan".to_string(),
-        gpu_name,
-        vram_total_mb,
-        vram_free_mb,
-        vram_used_mb,
+        // Фронтенд ждёт здесь платформу сервера (mac / windows / linux), а не «vulkan»
+        device_type: telemetry::host_platform().to_string(),
+        vram_total_mb: gpu.vram_total_bytes.map(bytes_to_mib),
+        vram_free_mb: gpu.vram_free_bytes().map(bytes_to_mib),
+        vram_used_mb: gpu.vram_used_bytes.map(bytes_to_mib),
+        gpu_name: gpu.name,
         cuda_available: false,
         rocm_available: false,
         vulkan_available: state.vk_ctx.is_some(),
@@ -142,16 +136,27 @@ pub async fn handle_update_status() -> Json<UpdateStatusResponse> {
     })
 }
 
-pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    use sysinfo::{System, Disks, Pid, ProcessesToUpdate, MemoryRefreshKind};
+/// Пауза между двумя замерами загрузки CPU: sysinfo считает загрузку по их разнице.
+const CPU_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+const EXPORT_UNAVAILABLE_REASON: &str = "not_implemented";
+const EXPORT_UNAVAILABLE_MESSAGE: &str =
+    "Экспорт моделей появится в SlothForge на этапе 3 дорожной карты";
 
+/// Процессор, память, диск и время работы компьютера. Синхронная (пауза замера CPU),
+/// поэтому вызывается через `spawn_blocking`: раньше `thread::sleep` останавливал
+/// рабочий поток асинхронного сервера.
+fn host_metrics() -> serde_json::Value {
+    use sysinfo::{Disks, MemoryRefreshKind, Pid, ProcessesToUpdate, System};
+
+    let pid = Pid::from_u32(std::process::id());
     let mut sys = System::new();
-    // Refresh CPU (need two readings for usage)
+    // Загрузка CPU считается по двум замерам
     sys.refresh_cpu_all();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(CPU_SAMPLE_INTERVAL);
     sys.refresh_cpu_all();
     sys.refresh_memory_specifics(MemoryRefreshKind::everything());
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    // Нужна память только своего процесса: обходить все процессы системы незачем
+    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
 
     let disks = Disks::new_with_refreshed_list();
 
@@ -168,12 +173,11 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let mem_percent = if total_mem_gb > 0.0 { (used_mem_gb / total_mem_gb) * 100.0 } else { 0.0 };
 
     // Process memory
-    let pid = Pid::from_u32(std::process::id());
     let process_used_mb = sys.process(pid)
         .map(|p| p.memory() as f64 / 1_048_576.0)
         .unwrap_or(0.0);
 
-    // Disk metrics (sum all mount points, use root "/" as primary)
+    // Disk metrics (root "/" as primary, otherwise the sum of all disks)
     let (disk_total_gb, disk_free_gb) = disks.list().iter()
         .find(|d| d.mount_point() == std::path::Path::new("/"))
         .map(|d| (
@@ -181,55 +185,16 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
             d.available_space() as f64 / 1_073_741_824.0,
         ))
         .unwrap_or_else(|| {
-            // Fallback: sum all disks
             let total: u64 = disks.list().iter().map(|d| d.total_space()).sum();
             let free: u64 = disks.list().iter().map(|d| d.available_space()).sum();
             (total as f64 / 1_073_741_824.0, free as f64 / 1_073_741_824.0)
         });
     let disk_percent = if disk_total_gb > 0.0 { ((disk_total_gb - disk_free_gb) / disk_total_gb) * 100.0 } else { 0.0 };
 
-    // Uptime
-    let uptime_secs = System::uptime();
-
-    // GPU (from Vulkan context — already real)
-    // Шаг 10: реальная занятость видеопамяти из VK_EXT_memory_budget
-    let vram_used: u64 = 0;
-    let dev_name = state
-        .vk_ctx
-        .as_ref()
-        .map(|c| c.device_name().to_string())
-        .unwrap_or_else(|| "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string());
-
-    let vram_used_gb = if vram_used > 0 {
-        vram_used as f64 / 1024.0
-    } else {
-        0.35
-    };
-    let vram_free_gb = 4.0 - vram_used_gb;
-    let vram_utilization_pct = (vram_used_gb / 4.0) * 100.0;
-
-    let gpu_device = serde_json::json!({
-        "device_id": 0,
-        "name": dev_name,
-        "gpu_name": dev_name,
-        "memory_total_gb": 4.0,
-        "vram_total_gb": 4.0,
-        "vram_used_gb": vram_used_gb,
-        "vram_free_gb": vram_free_gb,
-        "vram_utilization_pct": vram_utilization_pct,
-        "index": 0,
-        "visible_ordinal": 0,
-        "index_kind": "vulkan",
-        "backend": "vulkan",
-        "shared_memory": false
-    });
-
-    let resp = serde_json::json!({
-        "status": "ready",
+    serde_json::json!({
         "platform": std::env::consts::OS,
         "python_version": "N/A",
-        "device_backend": "vulkan",
-        "uptime_seconds": uptime_secs,
+        "uptime_seconds": System::uptime(),
         "cpu": {
             "logical_count": logical_count,
             "physical_count": physical_count,
@@ -247,52 +212,57 @@ pub async fn handle_system(State(state): State<Arc<AppState>>) -> Json<serde_jso
             "free_gb": (disk_free_gb * 10.0).round() / 10.0,
             "percent_used": (disk_percent * 10.0).round() / 10.0
         },
-        "gpu": {
-            "available": true,
-            "backend": "vulkan",
-            "devices": [gpu_device.clone()]
-        },
-        "inference_gpu": {
-            "available": true,
-            "backend": "vulkan",
-            "devices": [gpu_device]
-        },
         "ml_packages": {
             "torch": null,
             "transformers": null
         }
-    });
-    Json(resp)
+    })
 }
 
-pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let dev_name = state
-        .vk_ctx
-        .as_ref()
-        .map(|c| c.device_name().to_string())
-        .unwrap_or_else(|| "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string());
-    // Шаг 10: реальная занятость видеопамяти из VK_EXT_memory_budget
-    let vram_used: u64 = 0;
-    let vram_free_gb = (4096 - vram_used) as f64 / 1024.0;
+/// `GET /api/system` (`SystemInfoResponse` во фронтенде). Раньше видеокарта здесь была
+/// зашита: «RX 570», 4 ГБ, занято 0,35 ГБ.
+pub async fn handle_system(
+    State(state): State<Arc<AppState>>,
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    let mut response = tokio::task::spawn_blocking(host_metrics)
+        .await
+        .map_err(|err| crate::error::ApiError::internal(format!("Замер ресурсов компьютера прерван: {err}")))?;
+    let gpu = crate::telemetry::collect_for(&state).await;
+    let gpu_block = crate::telemetry::system_gpu_json(&gpu);
+    response["status"] = serde_json::json!("ready");
+    response["device_backend"] = serde_json::json!(crate::telemetry::device_backend(&gpu));
+    response["gpu"] = gpu_block.clone();
+    response["inference_gpu"] = gpu_block;
+    Ok(Json(response))
+}
 
-    let resp = serde_json::json!({
+/// `GET /api/system/hardware` (`useHardwareInfo` во фронтенде).
+pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    use crate::telemetry::bytes_to_gib;
+
+    let gpu = crate::telemetry::collect_for(&state).await;
+    let total_gb = gpu.vram_total_bytes.map(bytes_to_gib);
+    let free_gb = gpu.vram_free_bytes().map(bytes_to_gib);
+    let gpus: Vec<serde_json::Value> = if gpu.available() {
+        vec![serde_json::json!({
+            "name": gpu.name,
+            "gpu_name": gpu.name,
+            "vram_total_gb": total_gb,
+            "vram_free_gb": free_gb,
+            "vram_used_gb": gpu.vram_used_bytes.map(bytes_to_gib),
+            "vram_utilization_pct": gpu.vram_utilization_pct()
+        })]
+    } else {
+        Vec::new()
+    };
+
+    Json(serde_json::json!({
         "gpu": {
-            "gpu_name": dev_name,
-            "vram_total_gb": 4.0,
-            "vram_free_gb": vram_free_gb,
+            "gpu_name": gpu.name,
+            "vram_total_gb": total_gb,
+            "vram_free_gb": free_gb,
         },
-        "gpuName": dev_name,
-        "vramTotalGb": 4.0,
-        "vramFreeGb": vram_free_gb,
-        "gpus": [{
-            "device_id": 0,
-            "name": dev_name,
-            "gpu_name": dev_name,
-            "vram_total_gb": 4.0,
-            "vram_free_gb": vram_free_gb,
-            "vram_used_gb": (vram_used as f64 / 1024.0),
-            "vram_utilization_pct": ((vram_used as f64 / 4096.0) * 100.0)
-        }],
+        "gpus": gpus,
         "versions": {
             "torch": null,
             "cuda": null,
@@ -300,32 +270,20 @@ pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<
             "xpu": null,
             "transformers": null,
             "unsloth": null,
-            "vulkan": "1.3",
-            "sloth_vulkan": "0.1.0"
+            // Версия Vulkan API появится вместе с запросом свойств драйвера в Vulkan-слое
+            "vulkan": null,
+            "slothforge": env!("CARGO_PKG_VERSION")
         },
-        "torch": null,
-        "cuda": null,
-        "rocm": null,
-        "xpu": null,
-        "transformers": null,
-        "unsloth": null,
-        "llamaCpp": null,
         "llama_cpp": null,
-        "exportSupported": true,
-        "export_supported": true,
-        "exportUnsupportedReason": null,
-        "export_unsupported_reason": null,
-        "exportUnsupportedMessage": null,
-        "export_unsupported_message": null,
-        "videoSupported": false,
+        // Эндпоинты экспорта пока отвечают 501: интерфейс не должен предлагать экспорт
+        "export_supported": false,
+        "export_unsupported_reason": EXPORT_UNAVAILABLE_REASON,
+        "export_unsupported_message": EXPORT_UNAVAILABLE_MESSAGE,
         "video_supported": false,
-        "videoUnsupportedReason": "Генерация видео появится в SlothForge на этапе 7 дорожной карты",
         "video_unsupported_reason": "Генерация видео появится в SlothForge на этапе 7 дорожной карты",
-        "videoUnsupportedMessage": "Генерация видео пока не поддерживается в SlothForge",
         "video_unsupported_message": "Генерация видео пока не поддерживается в SlothForge",
         "loaded": true
-    });
-    Json(resp)
+    }))
 }
 
 pub async fn handle_check_vision(Path(id): Path<String>) -> Json<serde_json::Value> {

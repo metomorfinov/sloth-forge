@@ -18,6 +18,7 @@ pub mod security;
 pub mod settings;
 pub mod state;
 pub mod store;
+pub mod telemetry;
 pub mod training;
 pub mod unavailable;
 
@@ -137,7 +138,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/train/start-requests/:id", get(training::handlers::get_start_request))
         .route("/train/start-requests/:id/acknowledge", post(training::handlers::acknowledge_start_request))
         .route("/train/start-requests/:id/cancel", post(training::handlers::cancel_start_request))
-        .route("/train/hardware", get(handle_hardware))
+        .route("/train/hardware", get(handle_gpu_utilization))
         .route("/train/diffusion/status", get(api::handle_diffusion_status))
         // Chat & Inference Endpoints
         .route("/inference/status", get(inference_api::inference_status))

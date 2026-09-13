@@ -1,4 +1,6 @@
+use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
+use crate::telemetry::{self, bytes_to_mib};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -18,77 +20,71 @@ use tokio::sync::broadcast::error::RecvError;
 /// Как часто WebSocket повторяет статус обучения, если событий нет.
 const WS_STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// `GET /api/hardware`. Раньше здесь были выдуманные «GCN 4.0», «wavefront 64»,
+/// «Mesa 24.0.0» и занятые 1420 МБ; теперь только то, что сообщили Vulkan и драйвер.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareDetails {
-    pub gpu_name: String,
-    pub device_name: String,
-    pub vulkan_version: String,
-    pub wavefront_size: u32,
-    pub architecture: String,
-    pub compute_units: u32,
-    pub vram_total_mb: u64,
-    pub vram_used_mb: u64,
+    pub gpu_name: Option<String>,
+    pub vulkan_available: bool,
     pub backend: String,
-    pub driver: String,
+    pub kernel_driver: Option<String>,
+    pub vram_total_mb: Option<u64>,
+    pub vram_used_mb: Option<u64>,
+    pub vram_free_mb: Option<u64>,
     pub is_cluster: bool,
-    pub cluster_total_vram_mb: u64,
+    /// Видеопамять этого компьютера и подключённых узлов кластера.
+    pub cluster_total_vram_mb: Option<u64>,
 }
 
-pub async fn handle_vram(State(state): State<Arc<AppState>>) -> Json<VramInfo> {
-    if let Some(ctx) = &state.vk_ctx {
-        if let Ok(info) = ctx.get_vram_info() {
-            return Json(info);
-        }
-    }
-
-    // Default fallback for AMD Radeon RX 570 Series (RADV POLARIS10).
-    // Настоящие числа без Vulkan-контекста — шаг 10 (телеметрия железа)
-    let total_mb = 4096u64;
-    let used_mb = 1420;
-    let free_mb = total_mb.saturating_sub(used_mb);
-    let usage_percent = (used_mb as f32 / total_mb as f32) * 100.0;
-
-    Json(VramInfo {
-        device_name: "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string(),
-        total_bytes: total_mb * 1024 * 1024,
-        used_bytes: used_mb * 1024 * 1024,
-        free_bytes: free_mb * 1024 * 1024,
-        total_mb,
-        used_mb,
-        free_mb,
-        usage_percent,
-    })
+/// `GET /api/vram`: объём и занятость видеопамяти. 503, если занятость узнать нельзя.
+pub async fn handle_vram(State(state): State<Arc<AppState>>) -> ApiResult<Json<VramInfo>> {
+    let gpu = telemetry::collect_for(&state).await;
+    let (Some(total), Some(used)) = (gpu.vram_total_bytes, gpu.vram_used_bytes) else {
+        return Err(ApiError::service_unavailable(if gpu.available() {
+            "Драйвер видеокарты не сообщает, сколько видеопамяти занято"
+        } else {
+            "Видеокарта с поддержкой Vulkan не найдена"
+        }));
+    };
+    let free = total.saturating_sub(used);
+    Ok(Json(VramInfo {
+        device_name: gpu.name.clone().unwrap_or_default(),
+        total_bytes: total,
+        used_bytes: used,
+        free_bytes: free,
+        total_mb: bytes_to_mib(total),
+        used_mb: bytes_to_mib(used),
+        free_mb: bytes_to_mib(free),
+        usage_percent: gpu.vram_utilization_pct().unwrap_or(0.0) as f32,
+    }))
 }
 
 pub async fn handle_hardware(State(state): State<Arc<AppState>>) -> Json<HardwareDetails> {
-    let dev_name = state
-        .vk_ctx
-        .as_ref()
-        .map(|c| c.device_name().to_string())
-        .unwrap_or_else(|| "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string());
-
+    let gpu = telemetry::collect_for(&state).await;
     let workers = state.coordinator.list_workers().await;
-    let is_cluster = !workers.is_empty();
-    let cluster_vram: u64 = 4096 + workers.iter().map(|w| w.vram_mb).sum::<u64>();
-
-    // Шаг 10: реальная занятость видеопамяти вместо константы
-    let vram_used = 1420;
+    let workers_vram_mb: u64 = workers.iter().map(|worker| worker.vram_mb).sum();
 
     Json(HardwareDetails {
-        gpu_name: "AMD Radeon RX 570".to_string(),
-        device_name: dev_name,
-        vulkan_version: "Vulkan 1.4".to_string(),
-        wavefront_size: 64,
-        architecture: "GCN 4.0".to_string(),
-        compute_units: 32,
-        vram_total_mb: 4096,
-        vram_used_mb: vram_used,
-        backend: "Vulkan Native (wavefront 64, GCN 4.0)".to_string(),
-        driver: "RADV POLARIS10 (Mesa 24.0.0)".to_string(),
-        is_cluster,
-        cluster_total_vram_mb: cluster_vram,
+        vulkan_available: state.vk_ctx.is_some(),
+        backend: telemetry::device_backend(&gpu).to_string(),
+        kernel_driver: gpu.kernel_driver.clone(),
+        vram_total_mb: gpu.vram_total_bytes.map(bytes_to_mib),
+        vram_used_mb: gpu.vram_used_bytes.map(bytes_to_mib),
+        vram_free_mb: gpu.vram_free_bytes().map(bytes_to_mib),
+        is_cluster: !workers.is_empty(),
+        cluster_total_vram_mb: gpu
+            .vram_total_bytes
+            .map(|total| bytes_to_mib(total) + workers_vram_mb),
+        gpu_name: gpu.name,
     })
+}
+
+/// `GET /api/train/hardware`: загрузка, температура, видеопамять и мощность GPU для панели
+/// обучения (`GpuUtilization` во фронтенде). Раньше сюда отдавалась совсем другая структура.
+pub async fn handle_gpu_utilization(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let gpu = telemetry::collect_for(&state).await;
+    Json(telemetry::utilization_json(&gpu))
 }
 
 pub async fn handle_ws_telemetry(
@@ -117,7 +113,9 @@ async fn handle_ws_client(mut socket: WebSocket, state: Arc<AppState>) {
         "message": "[SYSTEM] Поток событий обучения SlothForge подключён"
     });
     if send_json(&mut socket, &welcome).await.is_err()
-        || send_json(&mut socket, &status_message(&state)).await.is_err()
+        || send_json(&mut socket, &status_message(&state))
+            .await
+            .is_err()
     {
         return;
     }

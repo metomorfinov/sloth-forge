@@ -23,7 +23,8 @@ int sloth_vk_init(int prefer_discrete, char* out_device_name, size_t max_len) {
     (void)prefer_discrete;
     g_initialized = 1;
     if (out_device_name && max_len > 0) {
-        const char* name = "AMD Radeon RX 570 Series (RADV POLARIS10)";
+        /* Заглушка без Vulkan: не выдаём себя за настоящую видеокарту */
+        const char* name = "SlothForge CPU fallback (no Vulkan)";
         strncpy(out_device_name, name, max_len - 1);
         out_device_name[max_len - 1] = '\0';
     }

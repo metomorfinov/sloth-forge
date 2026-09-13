@@ -57,6 +57,10 @@ pub struct VramInfo {
 }
 
 static INIT_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Инициализация и завершение идут по одному, иначе параллельные вызовы расходятся со счётчиком.
+static INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Размер буфера под имя устройства (VK_MAX_PHYSICAL_DEVICE_NAME_SIZE).
+const DEVICE_NAME_BUFFER_LEN: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct VulkanContext {
@@ -70,6 +74,9 @@ struct VulkanContextInner {
 
 impl Drop for VulkanContextInner {
     fn drop(&mut self) {
+        let _guard = INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if INIT_COUNT.fetch_sub(1, Ordering::SeqCst) == 1 {
             unsafe {
                 sloth_vk_shutdown();
@@ -80,35 +87,31 @@ impl Drop for VulkanContextInner {
 
 impl VulkanContext {
     pub fn init(prefer_discrete: bool) -> Result<Self, VulkanError> {
-        let mut name_buf = [0i8; 256];
-        if INIT_COUNT.fetch_add(1, Ordering::SeqCst) == 0 {
-            let code = unsafe {
-                sloth_vk_init(
-                    if prefer_discrete { 1 } else { 0 },
-                    name_buf.as_mut_ptr(),
-                    name_buf.len(),
-                )
-            };
-            if let Err(e) = VulkanError::from_code(code) {
-                INIT_COUNT.store(0, Ordering::SeqCst);
-                return Err(e);
-            }
-        }
+        let _guard = INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut name_buf = [0 as c_char; DEVICE_NAME_BUFFER_LEN];
+        // C-слой вызывается при каждой инициализации: уже готовый контекст просто возвращает
+        // имя устройства. Раньше повторный вызов пропускался, имя оставалось пустым и
+        // подменялось зашитым «AMD Radeon RX 570».
+        let code = unsafe {
+            sloth_vk_init(
+                if prefer_discrete { 1 } else { 0 },
+                name_buf.as_mut_ptr(),
+                name_buf.len(),
+            )
+        };
+        VulkanError::from_code(code)?;
+        INIT_COUNT.fetch_add(1, Ordering::SeqCst);
 
         let device_name = unsafe {
-            CStr::from_ptr(name_buf.as_ptr() as *const c_char)
+            CStr::from_ptr(name_buf.as_ptr())
                 .to_string_lossy()
                 .into_owned()
         };
 
         Ok(Self {
-            inner: Arc::new(VulkanContextInner {
-                device_name: if device_name.is_empty() {
-                    "AMD Radeon RX 570 Series (RADV POLARIS10)".to_string()
-                } else {
-                    device_name
-                },
-            }),
+            inner: Arc::new(VulkanContextInner { device_name }),
         })
     }
 
