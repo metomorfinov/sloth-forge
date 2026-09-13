@@ -71,6 +71,20 @@ int sloth_vk_get_vram_info(uint64_t* total_bytes, uint64_t* used_bytes, uint64_t
     return SLOTH_VK_SUCCESS;
 }
 
+int sloth_vk_get_device_info(SlothDeviceInfo* out) {
+    if (!out) return SLOTH_VK_ERROR_INVALID_PARAM;
+    if (!g_initialized) return SLOTH_VK_ERROR_NOT_INITIALIZED;
+    memset(out, 0, sizeof(*out));
+    strncpy(out->device_name, "SlothForge CPU fallback (no Vulkan)", SLOTH_VK_INFO_STRING_SIZE - 1);
+    out->device_type = SLOTH_VK_DEVICE_TYPE_CPU;
+    return SLOTH_VK_SUCCESS;
+}
+
+int sloth_vk_get_memory_budget(uint64_t* budget_bytes, uint64_t* usage_bytes) {
+    if (!budget_bytes || !usage_bytes) return SLOTH_VK_ERROR_INVALID_PARAM;
+    return SLOTH_VK_ERROR_NOT_SUPPORTED;
+}
+
 SlothBufferHandle sloth_vk_alloc_buffer(size_t size_bytes, int is_device_local) {
     (void)is_device_local;
     if (!g_initialized) return SLOTH_NULL_BUFFER;

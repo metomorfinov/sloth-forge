@@ -9,11 +9,48 @@
 #include "spv_embedded.h"
 #endif
 
+#include <array>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <cstdlib>
 
 namespace sloth {
+
+namespace {
+
+// Для разработки шейдеров: папка с .spv, которые подменяют встроенные копии
+const char* const SHADER_DIR_ENV = "SLOTH_SHADER_DIR";
+const uint32_t SPIRV_MAGIC = 0x07230203;
+const size_t SPIRV_WORD_BYTES = 4;
+
+struct EmbeddedShader {
+    const char* name;
+    const uint32_t* words;
+    size_t size_bytes;
+};
+
+const std::array<EmbeddedShader, 5> EMBEDDED_SHADERS = {{
+    {"gemm_f32", spv_gemm_f32_data, spv_gemm_f32_size},
+    {"lora_forward", spv_lora_forward_data, spv_lora_forward_size},
+    {"lora_backward", spv_lora_backward_data, spv_lora_backward_size},
+    {"rmsnorm", spv_rmsnorm_data, spv_rmsnorm_size},
+    {"adamw", spv_adamw_data, spv_adamw_size},
+}};
+
+// Пустой результат — файла нет или это не SPIR-V.
+std::vector<uint32_t> read_spirv_file(const std::string& path) {
+    std::ifstream file(path, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) return {};
+    const auto file_size = static_cast<size_t>(file.tellg());
+    if (file_size == 0 || file_size % SPIRV_WORD_BYTES != 0) return {};
+    std::vector<uint32_t> words(file_size / SPIRV_WORD_BYTES);
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(words.data()), static_cast<std::streamsize>(file_size));
+    if (!file || words[0] != SPIRV_MAGIC) return {};
+    return words;
+}
+
+} // namespace
 
 ComputePipeline::ComputePipeline(
     const std::string& shader_name,
@@ -29,47 +66,27 @@ ComputePipeline::~ComputePipeline() {
 }
 
 std::vector<uint32_t> ComputePipeline::load_spirv(const std::string& name) {
-    std::vector<std::string> search_paths;
-
-    const char* env_dir = std::getenv("SLOTH_SHADER_DIR");
-    if (env_dir) {
-        search_paths.push_back(std::string(env_dir) + "/" + name + ".spv");
+    // Раньше .spv искались в папках относительно текущего каталога (shaders/, ../shaders/) и
+    // перекрывали встроенные копии: устаревший файл рядом с программой молча менял расчёты.
+    // Теперь с диска шейдеры берутся только по явной просьбе через SLOTH_SHADER_DIR.
+    if (const char* dir = std::getenv(SHADER_DIR_ENV)) {
+        const std::string path = std::string(dir) + "/" + name + ".spv";
+        std::vector<uint32_t> words = read_spirv_file(path);
+        if (words.empty()) {
+            std::cerr << "[SlothVulkan] " << SHADER_DIR_ENV << " is set, but " << path
+                      << " is missing or is not SPIR-V." << std::endl;
+        } else {
+            std::cerr << "[SlothVulkan] Using shader from " << path << std::endl;
+        }
+        return words;
     }
-    search_paths.push_back("shaders/" + name + ".spv");
-    search_paths.push_back("crates/sloth-vulkan-sys/shaders/" + name + ".spv");
-    search_paths.push_back("../shaders/" + name + ".spv");
-    // Абсолютный путь под одну машину убран: на других компьютерах и в CI он не существует.
-    // Путь к шейдерам можно задать через SLOTH_SHADER_DIR, иначе используются встроенные копии.
 
-    for (const auto& path : search_paths) {
-        std::ifstream file(path, std::ios::ate | std::ios::binary);
-        if (file.is_open()) {
-            size_t file_size = static_cast<size_t>(file.tellg());
-            if (file_size > 0 && file_size % 4 == 0) {
-                std::vector<uint32_t> buffer(file_size / 4);
-                file.seekg(0);
-                file.read(reinterpret_cast<char*>(buffer.data()), file_size);
-                file.close();
-                return buffer;
-            }
-            file.close();
+    for (const auto& shader : EMBEDDED_SHADERS) {
+        if (name == shader.name) {
+            return std::vector<uint32_t>(shader.words, shader.words + shader.size_bytes / SPIRV_WORD_BYTES);
         }
     }
-
-    // Fallback to embedded SPIR-V byte tables
-    if (name == "gemm_f32") {
-        return std::vector<uint32_t>(spv_gemm_f32_data, spv_gemm_f32_data + (spv_gemm_f32_size / 4));
-    } else if (name == "lora_forward") {
-        return std::vector<uint32_t>(spv_lora_forward_data, spv_lora_forward_data + (spv_lora_forward_size / 4));
-    } else if (name == "lora_backward") {
-        return std::vector<uint32_t>(spv_lora_backward_data, spv_lora_backward_data + (spv_lora_backward_size / 4));
-    } else if (name == "rmsnorm") {
-        return std::vector<uint32_t>(spv_rmsnorm_data, spv_rmsnorm_data + (spv_rmsnorm_size / 4));
-    } else if (name == "adamw") {
-        return std::vector<uint32_t>(spv_adamw_data, spv_adamw_data + (spv_adamw_size / 4));
-    }
-
-    std::cerr << "[SlothVulkan] Failed to find or load shader: " << name << std::endl;
+    std::cerr << "[SlothVulkan] Unknown shader: " << name << std::endl;
     return {};
 }
 
@@ -81,7 +98,7 @@ bool ComputePipeline::init() {
     std::vector<uint32_t> spirv = load_spirv(shader_name_);
     if (spirv.empty()) return false;
 
-    // 1. Create Shader Module
+    // 1. Shader Module
     VkShaderModuleCreateInfo module_ci{};
     module_ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     module_ci.codeSize = spirv.size() * sizeof(uint32_t);
@@ -93,7 +110,7 @@ bool ComputePipeline::init() {
         return false;
     }
 
-    // 2. Create Descriptor Set Layout
+    // 2. Descriptor Set Layout
     std::vector<VkDescriptorSetLayoutBinding> bindings(num_buffers_);
     for (uint32_t i = 0; i < num_buffers_; ++i) {
         bindings[i].binding = i;
@@ -114,7 +131,7 @@ bool ComputePipeline::init() {
         return false;
     }
 
-    // 3. Create Pipeline Layout
+    // 3. Pipeline Layout
     VkPushConstantRange push_range{};
     push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     push_range.offset = 0;
@@ -135,7 +152,7 @@ bool ComputePipeline::init() {
         return false;
     }
 
-    // 4. Create Compute Pipeline
+    // 4. Compute Pipeline
     VkComputePipelineCreateInfo compute_pipe_ci{};
     compute_pipe_ci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     compute_pipe_ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -150,7 +167,7 @@ bool ComputePipeline::init() {
         return false;
     }
 
-    // 5. Create Descriptor Pool and Allocate Descriptor Set
+    // 5. Descriptor Pool and Descriptor Set
     if (num_buffers_ > 0) {
         VkDescriptorPoolSize pool_size{};
         pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -227,76 +244,62 @@ int ComputePipeline::dispatch(
 
     auto& ctx = VulkanContext::instance();
     if (!ctx.is_initialized()) return SLOTH_VK_ERROR_NOT_INITIALIZED;
-    VkDevice device = ctx.get_device();
 
     if (buffers.size() != num_buffers_) {
         std::cerr << "[SlothVulkan] Buffer count mismatch for pipeline " << shader_name_
                   << ": expected " << num_buffers_ << ", got " << buffers.size() << std::endl;
         return SLOTH_VK_ERROR_INVALID_PARAM;
     }
+    if (push_size > push_constant_size_) {
+        std::cerr << "[SlothVulkan] Push constants too large for pipeline " << shader_name_ << std::endl;
+        return SLOTH_VK_ERROR_INVALID_PARAM;
+    }
 
-    // Update descriptor set bindings
-    if (num_buffers_ > 0) {
-        std::vector<VkDescriptorBufferInfo> buf_infos(num_buffers_);
-        std::vector<VkWriteDescriptorSet> writes(num_buffers_);
+    // Больше групп, чем разрешает драйвер (на RX 570 — 65535 по каждой оси), — ошибка
+    // вызывающего, а не молчаливо пропущенная работа
+    const auto& max_groups = ctx.get_device_info().max_compute_work_group_count;
+    if (group_x > max_groups[0] || group_y > max_groups[1] || group_z > max_groups[2]) {
+        std::cerr << "[SlothVulkan] Dispatch " << group_x << "x" << group_y << "x" << group_z
+                  << " exceeds device limit " << max_groups[0] << "x" << max_groups[1] << "x"
+                  << max_groups[2] << " for pipeline " << shader_name_ << std::endl;
+        return SLOTH_VK_ERROR_INVALID_PARAM;
+    }
 
-        for (uint32_t i = 0; i < num_buffers_; ++i) {
-            if (!buffers[i] || buffers[i]->buffer == VK_NULL_HANDLE) {
-                return SLOTH_VK_ERROR_INVALID_PARAM;
+    std::vector<VkDescriptorBufferInfo> buf_infos(num_buffers_);
+    for (uint32_t i = 0; i < num_buffers_; ++i) {
+        if (!buffers[i] || buffers[i]->buffer == VK_NULL_HANDLE) {
+            return SLOTH_VK_ERROR_INVALID_PARAM;
+        }
+        buf_infos[i].buffer = buffers[i]->buffer;
+        buf_infos[i].offset = 0;
+        buf_infos[i].range = (buffers[i]->size > 0) ? buffers[i]->size : VK_WHOLE_SIZE;
+    }
+
+    // Набор дескрипторов один на конвейер: обновляем его под общей блокировкой отправки,
+    // иначе два потока переписали бы привязки буферов друг у друга
+    return ctx.run_commands([&](VkCommandBuffer cmd) {
+        if (num_buffers_ > 0) {
+            std::vector<VkWriteDescriptorSet> writes(num_buffers_);
+            for (uint32_t i = 0; i < num_buffers_; ++i) {
+                writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet = desc_set_;
+                writes[i].dstBinding = i;
+                writes[i].descriptorCount = 1;
+                writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                writes[i].pBufferInfo = &buf_infos[i];
             }
-
-            buf_infos[i].buffer = buffers[i]->buffer;
-            buf_infos[i].offset = 0;
-            buf_infos[i].range = (buffers[i]->size > 0) ? buffers[i]->size : VK_WHOLE_SIZE;
-
-            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[i].pNext = nullptr;
-            writes[i].dstSet = desc_set_;
-            writes[i].dstBinding = i;
-            writes[i].dstArrayElement = 0;
-            writes[i].descriptorCount = 1;
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].pImageInfo = nullptr;
-            writes[i].pBufferInfo = &buf_infos[i];
-            writes[i].pTexelBufferView = nullptr;
+            vkUpdateDescriptorSets(ctx.get_device(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
 
-        vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-    }
-
-    VkCommandBuffer cmd = ctx.begin_single_time_commands();
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-
-    if (num_buffers_ > 0) {
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &desc_set_, 0, nullptr);
-    }
-
-    if (push_constants && push_size > 0) {
-        vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, static_cast<uint32_t>(push_size), push_constants);
-    }
-
-    vkCmdDispatch(cmd, group_x, group_y, group_z);
-
-    // Memory barrier to guarantee that compute writes are visible to subsequent reads
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        1, &barrier,
-        0, nullptr,
-        0, nullptr
-    );
-
-    ctx.end_single_time_commands(cmd);
-
-    return SLOTH_VK_SUCCESS;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
+        if (num_buffers_ > 0) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout_, 0, 1, &desc_set_, 0, nullptr);
+        }
+        if (push_constants && push_size > 0) {
+            vkCmdPushConstants(cmd, pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, static_cast<uint32_t>(push_size), push_constants);
+        }
+        vkCmdDispatch(cmd, group_x, group_y, group_z);
+    });
 }
 
 PipelineManager& PipelineManager::instance() {

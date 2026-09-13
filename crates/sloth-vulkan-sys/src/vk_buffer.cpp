@@ -178,55 +178,26 @@ int BufferManager::write(SlothBufferHandle handle, const void* src, size_t size_
     }
 
     if (!buf->is_device_local) {
-        // Direct host copy
         if (!buf->mapped_ptr) return SLOTH_VK_ERROR_INVALID_PARAM;
         std::memcpy(buf->mapped_ptr, src, size_bytes);
         return SLOTH_VK_SUCCESS;
     }
 
-    // Staging buffer copy for Device-Local VRAM
+    // Видеопамять недоступна процессору напрямую: копируем через промежуточный буфер
     auto staging = create_internal_buffer(size_bytes, false);
-    if (!staging || !staging->mapped_ptr) {
+    if (!staging) {
         return SLOTH_VK_ERROR_OUT_OF_MEMORY;
     }
-
     std::memcpy(staging->mapped_ptr, src, size_bytes);
 
-    auto& ctx = VulkanContext::instance();
-    VkCommandBuffer cmd = ctx.begin_single_time_commands();
-
-    VkBufferCopy copy_region{};
-    copy_region.srcOffset = 0;
-    copy_region.dstOffset = 0;
-    copy_region.size = size_bytes;
-
-    vkCmdCopyBuffer(cmd, staging->buffer, buf->buffer, 1, &copy_region);
-
-    // Memory barrier to make transfer write visible to shader read
-    VkBufferMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.buffer = buf->buffer;
-    barrier.offset = 0;
-    barrier.size = size_bytes;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        0, nullptr,
-        1, &barrier,
-        0, nullptr
-    );
-
-    ctx.end_single_time_commands(cmd);
+    // Раньше результат копирования не проверялся: сбой GPU выглядел как успешная запись
+    int result = VulkanContext::instance().run_commands([&](VkCommandBuffer cmd) {
+        VkBufferCopy copy_region{};
+        copy_region.size = size_bytes;
+        vkCmdCopyBuffer(cmd, staging->buffer, buf->buffer, 1, &copy_region);
+    });
     destroy_internal_buffer(staging.get());
-
-    return SLOTH_VK_SUCCESS;
+    return result;
 }
 
 int BufferManager::read(SlothBufferHandle handle, void* dst, size_t size_bytes) {
@@ -249,49 +220,22 @@ int BufferManager::read(SlothBufferHandle handle, void* dst, size_t size_bytes) 
         return SLOTH_VK_SUCCESS;
     }
 
-    // Staging buffer copy from Device-Local VRAM
     auto staging = create_internal_buffer(size_bytes, false);
-    if (!staging || !staging->mapped_ptr) {
+    if (!staging) {
         return SLOTH_VK_ERROR_OUT_OF_MEMORY;
     }
 
-    auto& ctx = VulkanContext::instance();
-    VkCommandBuffer cmd = ctx.begin_single_time_commands();
-
-    // Barrier ensuring preceding compute writes are visible to transfer read
-    VkBufferMemoryBarrier pre_barrier{};
-    pre_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    pre_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    pre_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    pre_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    pre_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    pre_barrier.buffer = buf->buffer;
-    pre_barrier.offset = 0;
-    pre_barrier.size = size_bytes;
-
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0, nullptr,
-        1, &pre_barrier,
-        0, nullptr
-    );
-
-    VkBufferCopy copy_region{};
-    copy_region.srcOffset = 0;
-    copy_region.dstOffset = 0;
-    copy_region.size = size_bytes;
-
-    vkCmdCopyBuffer(cmd, buf->buffer, staging->buffer, 1, &copy_region);
-
-    ctx.end_single_time_commands(cmd);
-
-    std::memcpy(dst, staging->mapped_ptr, size_bytes);
+    int result = VulkanContext::instance().run_commands([&](VkCommandBuffer cmd) {
+        VkBufferCopy copy_region{};
+        copy_region.size = size_bytes;
+        vkCmdCopyBuffer(cmd, buf->buffer, staging->buffer, 1, &copy_region);
+    });
+    // Данные копируем в память вызывающего только после успешного выполнения на GPU
+    if (result == SLOTH_VK_SUCCESS) {
+        std::memcpy(dst, staging->mapped_ptr, size_bytes);
+    }
     destroy_internal_buffer(staging.get());
-
-    return SLOTH_VK_SUCCESS;
+    return result;
 }
 
 } // namespace sloth

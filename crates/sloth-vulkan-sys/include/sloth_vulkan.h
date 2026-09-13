@@ -35,6 +35,7 @@ extern "C" {
 #define SLOTH_VK_ERROR_SHADER_FAILED   -5
 #define SLOTH_VK_ERROR_DISPATCH_FAILED -6
 #define SLOTH_VK_ERROR_NOT_INITIALIZED -7
+#define SLOTH_VK_ERROR_NOT_SUPPORTED   -8
 
 /* Handle types */
 typedef uint64_t SlothBufferHandle;
@@ -62,6 +63,46 @@ SLOTH_VK_API void sloth_vk_shutdown(void);
  * @return 0 on success, negative error code otherwise.
  */
 SLOTH_VK_API int sloth_vk_get_vram_info(uint64_t* total_bytes, uint64_t* used_bytes, uint64_t* free_bytes);
+
+/* Размер строковых полей SlothDeviceInfo (как VK_MAX_PHYSICAL_DEVICE_NAME_SIZE и VK_MAX_DRIVER_*_SIZE). */
+#define SLOTH_VK_INFO_STRING_SIZE 256
+
+/* Тип устройства: значения VkPhysicalDeviceType. */
+#define SLOTH_VK_DEVICE_TYPE_OTHER          0
+#define SLOTH_VK_DEVICE_TYPE_INTEGRATED_GPU 1
+#define SLOTH_VK_DEVICE_TYPE_DISCRETE_GPU   2
+#define SLOTH_VK_DEVICE_TYPE_VIRTUAL_GPU    3
+#define SLOTH_VK_DEVICE_TYPE_CPU            4
+
+/** Сведения о выбранном устройстве. Порядок полей закреплён: его повторяет Rust (ffi.rs). */
+typedef struct SlothDeviceInfo {
+    char device_name[SLOTH_VK_INFO_STRING_SIZE];
+    char driver_name[SLOTH_VK_INFO_STRING_SIZE]; /* например "radv"; пусто — драйвер не сообщает */
+    char driver_info[SLOTH_VK_INFO_STRING_SIZE]; /* например "Mesa 26.2.2" */
+    uint32_t vendor_id;
+    uint32_t device_id;
+    uint32_t api_version;    /* VK_MAKE_API_VERSION(variant, major, minor, patch) */
+    uint32_t driver_version; /* кодировка зависит от производителя */
+    uint32_t device_type;    /* SLOTH_VK_DEVICE_TYPE_* */
+    uint32_t subgroup_size;  /* 0 — неизвестно */
+    uint32_t max_compute_work_group_count[3];
+    uint32_t memory_budget_supported; /* 1 — драйвер поддерживает VK_EXT_memory_budget */
+    uint64_t device_local_bytes;      /* объём видеопамяти (DEVICE_LOCAL-кучи) */
+} SlothDeviceInfo;
+
+/**
+ * @brief Сведения о выбранном устройстве: имя, драйвер, версия API, лимиты.
+ * Видеокарту можно выбрать переменной окружения SLOTH_VK_DEVICE (номер или часть имени).
+ */
+SLOTH_VK_API int sloth_vk_get_device_info(SlothDeviceInfo* out);
+
+/**
+ * @brief Бюджет видеопамяти через VK_EXT_memory_budget (работает и на Windows).
+ * @param budget_bytes Сколько видеопамяти процесс может занять сейчас с учётом других программ.
+ * @param usage_bytes Сколько занимает сам процесс.
+ * @return SLOTH_VK_ERROR_NOT_SUPPORTED, если драйвер не поддерживает расширение.
+ */
+SLOTH_VK_API int sloth_vk_get_memory_budget(uint64_t* budget_bytes, uint64_t* usage_bytes);
 
 /**
  * @brief Allocate a GPU storage buffer.
