@@ -85,7 +85,13 @@ pub struct LoraLayer {
 }
 
 impl LoraLayer {
-    pub fn new(name: String, in_features: usize, out_features: usize, rank: usize, alpha: f32) -> Self {
+    pub fn new(
+        name: String,
+        in_features: usize,
+        out_features: usize,
+        rank: usize,
+        alpha: f32,
+    ) -> Self {
         let scale = if rank > 0 { alpha / rank as f32 } else { 1.0 };
         let mut rng = StdRng::seed_from_u64(42 + in_features as u64 + out_features as u64);
 
@@ -135,10 +141,44 @@ impl LoraLayer {
         self.grad_b.fill(0.0);
     }
 
+    /// Готовит слой к обучению после загрузки из файла. Градиенты и моменты AdamW в файл
+    /// адаптера не пишутся, поэтому раньше после загрузки они были пустыми и первый же шаг
+    /// обучения падал с выходом за границы массива.
+    fn restore_training_state(&mut self) -> Result<(), LoraError> {
+        let expected_a = self.in_features * self.rank;
+        if self.weight_a.len() != expected_a {
+            return Err(LoraError::DimensionMismatch {
+                expected: expected_a,
+                actual: self.weight_a.len(),
+            });
+        }
+        let expected_b = self.rank * self.out_features;
+        if self.weight_b.len() != expected_b {
+            return Err(LoraError::DimensionMismatch {
+                expected: expected_b,
+                actual: self.weight_b.len(),
+            });
+        }
+        self.grad_a = vec![0.0; expected_a];
+        self.grad_b = vec![0.0; expected_b];
+        self.m_a = vec![0.0; expected_a];
+        self.v_a = vec![0.0; expected_a];
+        self.m_b = vec![0.0; expected_b];
+        self.v_b = vec![0.0; expected_b];
+        // Моменты начинаются заново, значит и поправка на смещение считается с первого шага
+        self.step = 0;
+        Ok(())
+    }
+
     /// Forward pass: Out = X * W_base + (alpha / rank) * (X * A) * B
     /// X: [batch_seq, in_features]
     /// Returns Out: [batch_seq, out_features]
-    pub fn forward(&self, x: &[f32], w_base: Option<&[f32]>, batch_seq: usize) -> Result<Vec<f32>, LoraError> {
+    pub fn forward(
+        &self,
+        x: &[f32],
+        w_base: Option<&[f32]>,
+        batch_seq: usize,
+    ) -> Result<Vec<f32>, LoraError> {
         if x.len() != batch_seq * self.in_features {
             return Err(LoraError::DimensionMismatch {
                 expected: batch_seq * self.in_features,
@@ -188,7 +228,12 @@ impl LoraLayer {
 
     /// Backward pass: computes and accumulates dA and dB gradients directly.
     /// d_out: [batch_seq, out_features]
-    pub fn backward(&mut self, x: &[f32], d_out: &[f32], batch_seq: usize) -> Result<(), LoraError> {
+    pub fn backward(
+        &mut self,
+        x: &[f32],
+        d_out: &[f32],
+        batch_seq: usize,
+    ) -> Result<(), LoraError> {
         if x.len() != batch_seq * self.in_features || d_out.len() != batch_seq * self.out_features {
             return Err(LoraError::DimensionMismatch {
                 expected: batch_seq * self.out_features,
@@ -226,7 +271,8 @@ impl LoraLayer {
             for r in 0..self.rank {
                 let mut sum = 0.0f32;
                 for o in 0..self.out_features {
-                    sum += d_out[b * self.out_features + o] * self.weight_b[r * self.out_features + o];
+                    sum +=
+                        d_out[b * self.out_features + o] * self.weight_b[r * self.out_features + o];
                 }
                 dh[b * self.rank + r] = self.scale * sum;
             }
@@ -364,7 +410,10 @@ impl LoraModel {
     pub fn load_adapter_checkpoint<P: AsRef<Path>>(path: P) -> Result<Self, LoraError> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let model = serde_json::from_reader(reader)?;
+        let mut model: Self = serde_json::from_reader(reader)?;
+        for layer in model.layers.values_mut() {
+            layer.restore_training_state()?;
+        }
         Ok(model)
     }
 }
@@ -407,5 +456,51 @@ mod tests {
         layer.adamw_step(0.01, 0.9, 0.999, 1e-8, 0.01);
         assert_ne!(initial_a, layer.weight_a);
         assert_eq!(layer.step, 1);
+    }
+
+    fn small_config() -> LoraConfig {
+        LoraConfig {
+            rank: 2,
+            alpha: 4.0,
+            ..LoraConfig::default()
+        }
+    }
+
+    #[test]
+    fn loaded_checkpoint_can_continue_training() {
+        let mut model = LoraModel::new(small_config(), vec![("q_proj".to_string(), 4, 4)]);
+        let layer = model.layers.get_mut("q_proj").unwrap();
+        layer.weight_b.fill(0.1);
+        layer.backward(&[1.0; 8], &[0.5; 8], 2).unwrap();
+        model.adamw_step(0.01);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.json");
+        model.save_adapter_checkpoint(&path).unwrap();
+
+        let mut loaded = LoraModel::load_adapter_checkpoint(&path).unwrap();
+        let layer = loaded.layers.get_mut("q_proj").unwrap();
+        assert_eq!(layer.weight_a, model.layers["q_proj"].weight_a);
+        assert_eq!(
+            layer.step, 0,
+            "моменты начинаются заново вместе со счётчиком шага"
+        );
+        // Раньше здесь была паника: градиенты и моменты после загрузки были пустыми
+        layer.backward(&[1.0; 8], &[0.5; 8], 2).unwrap();
+        loaded.adamw_step(0.01);
+        assert_eq!(loaded.layers["q_proj"].step, 1);
+    }
+
+    #[test]
+    fn checkpoint_with_wrong_dimensions_is_rejected() {
+        let mut model = LoraModel::new(small_config(), vec![("q_proj".to_string(), 4, 4)]);
+        model.layers.get_mut("q_proj").unwrap().weight_a.pop();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.json");
+        model.save_adapter_checkpoint(&path).unwrap();
+        assert!(matches!(
+            LoraModel::load_adapter_checkpoint(&path),
+            Err(LoraError::DimensionMismatch { .. })
+        ));
     }
 }

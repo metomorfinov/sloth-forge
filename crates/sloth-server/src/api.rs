@@ -96,7 +96,10 @@ pub async fn handle_auth_status() -> Json<AuthStatusResponse> {
         requires_password_change: false,
         bootstrap_deadline_seconds: None,
         user: AuthStatusUser {
-            username: "rivergod".to_string(),
+            // Имя пользователя системы, а не зашитое имя разработчика
+            username: std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "admin".to_string()),
             role: "admin".to_string(),
         },
     })

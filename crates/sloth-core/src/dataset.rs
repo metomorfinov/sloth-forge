@@ -123,30 +123,38 @@ impl SimpleTokenizer {
         tokenizer
     }
 
+    /// Id первого побайтового токена `<0x00>` (побайтовые токены занимают id 3..=258).
+    const BYTE_TOKEN_OFFSET: u32 = 3;
+
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut tokens = Vec::new();
         let mut remaining = text;
 
         while !remaining.is_empty() {
-            // Check for special tags first
-            let mut matched_special = false;
-            for (special, &id) in &self.vocab {
-                if id >= IM_START_TOKEN_ID && remaining.starts_with(special) {
-                    tokens.push(id);
-                    remaining = &remaining[special.len()..];
-                    matched_special = true;
-                    break;
-                }
-            }
-
-            if matched_special {
+            // Специальные и добавленные токены: самый длинный подходящий (при равной длине —
+            // с меньшим id), чтобы результат не зависел от порядка обхода HashMap
+            let special = self
+                .vocab
+                .iter()
+                .filter(|(token, id)| {
+                    **id >= IM_START_TOKEN_ID
+                        && !token.is_empty()
+                        && remaining.starts_with(token.as_str())
+                })
+                .max_by(|(a, a_id), (b, b_id)| a.len().cmp(&b.len()).then(b_id.cmp(a_id)));
+            if let Some((token, &id)) = special {
+                tokens.push(id);
+                remaining = &remaining[token.len()..];
                 continue;
             }
 
-            // Byte-level fallback
-            let b = remaining.as_bytes()[0];
-            tokens.push(3 + b as u32);
-            remaining = &remaining[1..];
+            // Побайтовый запасной вариант: все байты символа целиком. Раньше строка резалась
+            // по одному байту, и первый же многобайтный символ (кириллица) ронял программу
+            let char_len = remaining.chars().next().map_or(1, char::len_utf8);
+            for &byte in &remaining.as_bytes()[..char_len] {
+                tokens.push(Self::BYTE_TOKEN_OFFSET + u32::from(byte));
+            }
+            remaining = &remaining[char_len..];
         }
 
         tokens
@@ -168,7 +176,10 @@ impl SimpleTokenizer {
 pub struct DatasetLoader;
 
 impl DatasetLoader {
-    pub fn parse_samples(content: &str, format: DatasetFormat) -> Result<Vec<SampleItem>, DatasetError> {
+    pub fn parse_samples(
+        content: &str,
+        format: DatasetFormat,
+    ) -> Result<Vec<SampleItem>, DatasetError> {
         let mut samples = Vec::new();
 
         for line in content.lines() {
@@ -214,9 +225,13 @@ impl DatasetLoader {
 
                     for msg in wrapper.messages {
                         if msg.role == "assistant" {
-                            completion = format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content);
+                            completion =
+                                format!("<|im_start|>assistant\n{}<|im_end|>\n", msg.content);
                         } else {
-                            prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", msg.role, msg.content));
+                            prompt.push_str(&format!(
+                                "<|im_start|>{}\n{}<|im_end|>\n",
+                                msg.role, msg.content
+                            ));
                         }
                     }
                     if !completion.is_empty() {
@@ -433,13 +448,37 @@ mod tests {
     }
 
     #[test]
+    fn tokenizer_handles_multibyte_text() {
+        let tokenizer = SimpleTokenizer::new();
+        let text = "Привет, мир! 🦥 <|im_start|>user\nтест<|im_end|>";
+        let tokens = tokenizer.encode(text);
+        assert!(tokens.contains(&IM_START_TOKEN_ID));
+        assert_eq!(tokenizer.decode(&tokens), text);
+    }
+
+    #[test]
+    fn longest_special_token_wins() {
+        let mut tokenizer = SimpleTokenizer::new();
+        let longer = IM_END_TOKEN_ID + 1;
+        tokenizer
+            .vocab
+            .insert("<|im_start|>assistant".to_string(), longer);
+        // Результат не зависит от порядка обхода HashMap: берётся самый длинный токен
+        for _ in 0..8 {
+            assert_eq!(tokenizer.encode("<|im_start|>assistant"), [longer]);
+        }
+    }
+
+    #[test]
     fn test_alpaca_parsing_and_sequence_packing() {
         let alpaca_json = r#"{"instruction": "Tell me a joke", "input": "", "output": "Sloth is fast!"}
 {"instruction": "Calculate 2+2", "input": "", "output": "4"}"#;
 
         let tokenizer = SimpleTokenizer::new();
         // 512 tokens window easily holds both short sequences
-        let packed = DatasetLoader::load_from_str(alpaca_json, DatasetFormat::Alpaca, &tokenizer, 512, true).unwrap();
+        let packed =
+            DatasetLoader::load_from_str(alpaca_json, DatasetFormat::Alpaca, &tokenizer, 512, true)
+                .unwrap();
 
         assert!(!packed.is_empty());
         let first = &packed[0];
