@@ -91,6 +91,13 @@ int sloth_vk_forward_lora(
 ) {
     uint32_t total_tokens = batch * seq;
     if (total_tokens == 0 || in_dim == 0 || out_dim == 0) return SLOTH_VK_SUCCESS;
+    // Шейдер хранит промежуточный вектор в общем массиве фиксированного размера: больший ранг
+    // раньше молча обрезался до 128 и давал неверный результат
+    if (rank > SLOTH_VK_LORA_MAX_RANK) {
+        std::cerr << "[SlothVulkan] LoRA rank " << rank << " exceeds shader limit "
+                  << SLOTH_VK_LORA_MAX_RANK << std::endl;
+        return SLOTH_VK_ERROR_INVALID_PARAM;
+    }
 
     auto bufX = BufferManager::instance().get_buffer(X);
     auto bufW = BufferManager::instance().get_buffer(W_base);
@@ -99,6 +106,8 @@ int sloth_vk_forward_lora(
     auto bufOut = BufferManager::instance().get_buffer(Out);
 
     if (!bufX || !bufA || !bufB || !bufOut) return SLOTH_VK_ERROR_INVALID_PARAM;
+    // Нулевой дескриптор W означает «без базового веса», а неверный — ошибку вызывающего
+    if (W_base != SLOTH_NULL_BUFFER && !bufW) return SLOTH_VK_ERROR_INVALID_PARAM;
 
     uint32_t has_base = 1;
     if (!bufW) {

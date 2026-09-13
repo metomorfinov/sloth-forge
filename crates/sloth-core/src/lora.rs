@@ -20,6 +20,17 @@ pub enum LoraError {
     LayerNotFound(String),
 }
 
+fn check_len(values: &[f32], expected: usize) -> Result<(), LoraError> {
+    if values.len() == expected {
+        Ok(())
+    } else {
+        Err(LoraError::DimensionMismatch {
+            expected,
+            actual: values.len(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoraConfig {
     pub rank: usize,
@@ -60,10 +71,11 @@ pub struct LoraLayer {
     pub alpha: f32,
     pub scale: f32,
 
-    // Weight matrices
-    // weight_a: [in_features, rank]
+    // Матрицы в раскладке PyTorch/PEFT, построчно — так же хранит их GPU-операция
+    // sloth_vk_forward_lora и так они лежат в файлах адаптеров Hugging Face.
+    // weight_a (lora_A): [rank, in_features]
     pub weight_a: Vec<f32>,
-    // weight_b: [rank, out_features]
+    // weight_b (lora_B): [out_features, rank]
     pub weight_b: Vec<f32>,
 
     // Gradients (accumulated across micro-batches)
@@ -170,122 +182,102 @@ impl LoraLayer {
         Ok(())
     }
 
-    /// Forward pass: Out = X * W_base + (alpha / rank) * (X * A) * B
-    /// X: [batch_seq, in_features]
-    /// Returns Out: [batch_seq, out_features]
+    /// h[t, r] = (A x_t)[r]: проекция в пространство ранга, [batch_seq, rank].
+    fn project_down(&self, x: &[f32], batch_seq: usize) -> Vec<f32> {
+        let (in_f, rank) = (self.in_features, self.rank);
+        let mut h = vec![0.0f32; batch_seq * rank];
+        for t in 0..batch_seq {
+            let x_row = &x[t * in_f..(t + 1) * in_f];
+            for r in 0..rank {
+                let a_row = &self.weight_a[r * in_f..(r + 1) * in_f];
+                h[t * rank + r] = x_row.iter().zip(a_row).map(|(x, a)| x * a).sum();
+            }
+        }
+        h
+    }
+
+    /// Прямой проход: Out = W x + scale * B (A x), раскладка как в PyTorch/PEFT и на GPU.
+    /// X: [batch_seq, in_features], W_base: [out_features, in_features].
+    /// Возвращает Out: [batch_seq, out_features].
     pub fn forward(
         &self,
         x: &[f32],
         w_base: Option<&[f32]>,
         batch_seq: usize,
     ) -> Result<Vec<f32>, LoraError> {
-        if x.len() != batch_seq * self.in_features {
-            return Err(LoraError::DimensionMismatch {
-                expected: batch_seq * self.in_features,
-                actual: x.len(),
-            });
-        }
-
-        let mut out = vec![0.0f32; batch_seq * self.out_features];
-
-        // 1. Base weights contribution if provided
+        let (in_f, out_f, rank) = (self.in_features, self.out_features, self.rank);
+        check_len(x, batch_seq * in_f)?;
         if let Some(w) = w_base {
-            for b in 0..batch_seq {
-                for o in 0..self.out_features {
-                    let mut sum = 0.0f32;
-                    for i in 0..self.in_features {
-                        sum += x[b * self.in_features + i] * w[i * self.out_features + o];
-                    }
-                    out[b * self.out_features + o] = sum;
+            check_len(w, out_f * in_f)?;
+        }
+
+        let mut out = vec![0.0f32; batch_seq * out_f];
+        if let Some(w) = w_base {
+            for t in 0..batch_seq {
+                let x_row = &x[t * in_f..(t + 1) * in_f];
+                for o in 0..out_f {
+                    let w_row = &w[o * in_f..(o + 1) * in_f];
+                    out[t * out_f + o] = x_row.iter().zip(w_row).map(|(x, w)| x * w).sum();
                 }
             }
         }
 
-        // 2. LoRA contribution: h = X * A, then Out += scale * h * B
-        let mut h = vec![0.0f32; batch_seq * self.rank];
-        for b in 0..batch_seq {
-            for r in 0..self.rank {
-                let mut sum = 0.0f32;
-                for i in 0..self.in_features {
-                    sum += x[b * self.in_features + i] * self.weight_a[i * self.rank + r];
-                }
-                h[b * self.rank + r] = sum;
+        let h = self.project_down(x, batch_seq);
+        for t in 0..batch_seq {
+            let h_row = &h[t * rank..(t + 1) * rank];
+            for o in 0..out_f {
+                let b_row = &self.weight_b[o * rank..(o + 1) * rank];
+                let lora: f32 = h_row.iter().zip(b_row).map(|(h, b)| h * b).sum();
+                out[t * out_f + o] += self.scale * lora;
             }
         }
-
-        for b in 0..batch_seq {
-            for o in 0..self.out_features {
-                let mut sum = 0.0f32;
-                for r in 0..self.rank {
-                    sum += h[b * self.rank + r] * self.weight_b[r * self.out_features + o];
-                }
-                out[b * self.out_features + o] += self.scale * sum;
-            }
-        }
-
         Ok(out)
     }
 
-    /// Backward pass: computes and accumulates dA and dB gradients directly.
-    /// d_out: [batch_seq, out_features]
+    /// Обратный проход: **прибавляет** градиенты к grad_a [rank, in] и grad_b [out, rank],
+    /// чтобы копить их между микробатчами (сбрасывает `zero_grad`/`adamw_step`).
+    /// Операция на GPU градиенты перезаписывает: накопление — забота вызывающего кода.
+    /// d_out: [batch_seq, out_features].
     pub fn backward(
         &mut self,
         x: &[f32],
         d_out: &[f32],
         batch_seq: usize,
     ) -> Result<(), LoraError> {
-        if x.len() != batch_seq * self.in_features || d_out.len() != batch_seq * self.out_features {
-            return Err(LoraError::DimensionMismatch {
-                expected: batch_seq * self.out_features,
-                actual: d_out.len(),
-            });
-        }
+        let (in_f, out_f, rank) = (self.in_features, self.out_features, self.rank);
+        check_len(x, batch_seq * in_f)?;
+        check_len(d_out, batch_seq * out_f)?;
 
-        // 1. Recompute intermediate h = X * A: [batch_seq, rank]
-        let mut h = vec![0.0f32; batch_seq * self.rank];
-        for b in 0..batch_seq {
-            for r in 0..self.rank {
-                let mut sum = 0.0f32;
-                for i in 0..self.in_features {
-                    sum += x[b * self.in_features + i] * self.weight_a[i * self.rank + r];
-                }
-                h[b * self.rank + r] = sum;
+        let h = self.project_down(x, batch_seq);
+
+        // dB[o, r] = scale * sum_t dOut[t, o] * h[t, r]
+        for o in 0..out_f {
+            for r in 0..rank {
+                let sum: f32 = (0..batch_seq)
+                    .map(|t| d_out[t * out_f + o] * h[t * rank + r])
+                    .sum();
+                self.grad_b[o * rank + r] += self.scale * sum;
             }
         }
 
-        // 2. Accumulate grad_b: dB = scale * (h^T * dOut)
-        // h^T: [rank, batch_seq], dOut: [batch_seq, out_features]
-        for r in 0..self.rank {
-            for o in 0..self.out_features {
-                let mut sum = 0.0f32;
-                for b in 0..batch_seq {
-                    sum += h[b * self.rank + r] * d_out[b * self.out_features + o];
-                }
-                self.grad_b[r * self.out_features + o] += self.scale * sum;
+        // dh[t, r] = scale * (B^T dOut_t)[r]
+        let mut dh = vec![0.0f32; batch_seq * rank];
+        for t in 0..batch_seq {
+            for r in 0..rank {
+                let sum: f32 = (0..out_f)
+                    .map(|o| d_out[t * out_f + o] * self.weight_b[o * rank + r])
+                    .sum();
+                dh[t * rank + r] = self.scale * sum;
             }
         }
 
-        // 3. dh = scale * (dOut * B^T): [batch_seq, rank]
-        let mut dh = vec![0.0f32; batch_seq * self.rank];
-        for b in 0..batch_seq {
-            for r in 0..self.rank {
-                let mut sum = 0.0f32;
-                for o in 0..self.out_features {
-                    sum +=
-                        d_out[b * self.out_features + o] * self.weight_b[r * self.out_features + o];
-                }
-                dh[b * self.rank + r] = self.scale * sum;
-            }
-        }
-
-        // 4. Accumulate grad_a: dA = X^T * dh: [in_features, rank]
-        for i in 0..self.in_features {
-            for r in 0..self.rank {
-                let mut sum = 0.0f32;
-                for b in 0..batch_seq {
-                    sum += x[b * self.in_features + i] * dh[b * self.rank + r];
-                }
-                self.grad_a[i * self.rank + r] += sum;
+        // dA[r, i] = sum_t dh[t, r] * x[t, i]
+        for r in 0..rank {
+            for i in 0..in_f {
+                let sum: f32 = (0..batch_seq)
+                    .map(|t| dh[t * rank + r] * x[t * in_f + i])
+                    .sum();
+                self.grad_a[r * in_f + i] += sum;
             }
         }
 
@@ -489,6 +481,84 @@ mod tests {
         layer.backward(&[1.0; 8], &[0.5; 8], 2).unwrap();
         loaded.adamw_step(0.01);
         assert_eq!(loaded.layers["q_proj"].step, 1);
+    }
+
+    fn assert_close(actual: &[f32], expected: &[f32]) {
+        const TOLERANCE: f32 = 1e-5;
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= TOLERANCE,
+                "элемент {index}: {a} вместо {e}"
+            );
+        }
+    }
+
+    /// Раскладка PEFT на неоднородных данных: раньше слой хранил A и B транспонированными
+    /// относительно GPU-операции, а тесты на одинаковых числах этого не замечали.
+    #[test]
+    fn matches_peft_layout_on_uneven_data() {
+        let (in_f, out_f, rank, tokens) = (5, 3, 2, 2);
+        let mut layer = LoraLayer::new("o_proj".to_string(), in_f, out_f, rank, 6.0);
+        layer.weight_a = (0..rank * in_f).map(|i| (i as f32 * 0.37).sin()).collect();
+        layer.weight_b = (0..out_f * rank).map(|i| (i as f32 * 0.91).cos()).collect();
+        let x: Vec<f32> = (0..tokens * in_f)
+            .map(|i| (i as f32 * 0.53).sin() + 0.1)
+            .collect();
+        let w: Vec<f32> = (0..out_f * in_f).map(|i| (i as f32 * 0.29).cos()).collect();
+        let d_out: Vec<f32> = (0..tokens * out_f)
+            .map(|i| (i as f32 * 0.71).sin())
+            .collect();
+
+        // Эталон по формулам PEFT: A [rank, in], B [out, rank], W [out, in]
+        let (a, b, scale) = (layer.weight_a.clone(), layer.weight_b.clone(), layer.scale);
+        let h = |t: usize, r: usize| -> f32 {
+            (0..in_f).map(|i| a[r * in_f + i] * x[t * in_f + i]).sum()
+        };
+        let mut expected_out = vec![0.0f32; tokens * out_f];
+        let mut expected_grad_b = vec![0.0f32; out_f * rank];
+        let mut expected_grad_a = vec![0.0f32; rank * in_f];
+        for t in 0..tokens {
+            for o in 0..out_f {
+                let base: f32 = (0..in_f).map(|i| w[o * in_f + i] * x[t * in_f + i]).sum();
+                let lora: f32 = (0..rank).map(|r| b[o * rank + r] * h(t, r)).sum();
+                expected_out[t * out_f + o] = base + scale * lora;
+                for r in 0..rank {
+                    expected_grad_b[o * rank + r] += scale * d_out[t * out_f + o] * h(t, r);
+                }
+            }
+            for r in 0..rank {
+                let dh: f32 = (0..out_f)
+                    .map(|o| d_out[t * out_f + o] * b[o * rank + r])
+                    .sum();
+                for i in 0..in_f {
+                    expected_grad_a[r * in_f + i] += scale * dh * x[t * in_f + i];
+                }
+            }
+        }
+
+        assert_close(&layer.forward(&x, Some(&w), tokens).unwrap(), &expected_out);
+        layer.backward(&x, &d_out, tokens).unwrap();
+        assert_close(&layer.grad_a, &expected_grad_a);
+        assert_close(&layer.grad_b, &expected_grad_b);
+
+        // Второй микробатч прибавляется к градиентам, а не заменяет их
+        layer.backward(&x, &d_out, tokens).unwrap();
+        let doubled = |values: &[f32]| values.iter().map(|v| v * 2.0).collect::<Vec<_>>();
+        assert_close(&layer.grad_a, &doubled(&expected_grad_a));
+        assert_close(&layer.grad_b, &doubled(&expected_grad_b));
+    }
+
+    #[test]
+    fn wrong_base_weight_size_is_rejected() {
+        let layer = LoraLayer::new("q_proj".to_string(), 4, 3, 2, 4.0);
+        assert!(matches!(
+            layer.forward(&[0.5; 4], Some(&[1.0; 11]), 1),
+            Err(LoraError::DimensionMismatch {
+                expected: 12,
+                actual: 11
+            })
+        ));
     }
 
     #[test]

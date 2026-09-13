@@ -7,6 +7,8 @@ pub use wrapper::*;
 /// С чем собран крейт: `vulkan` (настоящий Vulkan-слой) или `stub` (CPU-заглушка без
 /// видеокарты). Выбирает build.rs, см. переменную `SLOTH_VULKAN`.
 pub const BACKEND: &str = env!("SLOTH_VK_BACKEND");
+/// Значение [`BACKEND`] для CPU-заглушки.
+pub const STUB_BACKEND: &str = "stub";
 
 #[cfg(test)]
 mod tests {
@@ -23,7 +25,12 @@ mod tests {
         println!("Device: {}", ctx.device_name());
 
         let vram = ctx.get_vram_info().expect("VRAM info query should succeed");
-        assert!(vram.total_bytes > 0);
+        if BACKEND == STUB_BACKEND {
+            // Заглушка не выдаёт себя за видеокарту: видеопамяти у неё нет
+            assert_eq!(vram.total_bytes, 0);
+        } else {
+            assert!(vram.total_bytes > 0);
+        }
         println!("VRAM: {} MB used / {} MB total", vram.used_mb, vram.total_mb);
     }
 

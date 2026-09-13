@@ -12,6 +12,9 @@ pub const SLOTH_VK_ERROR_SHADER_FAILED: c_int = -5;
 pub const SLOTH_VK_ERROR_DISPATCH_FAILED: c_int = -6;
 pub const SLOTH_VK_ERROR_NOT_INITIALIZED: c_int = -7;
 
+/// Наибольший ранг LoRA, который поддерживает шейдер прямого прохода.
+pub const SLOTH_VK_LORA_MAX_RANK: u32 = 128;
+
 extern "C" {
     pub fn sloth_vk_init(
         prefer_discrete: c_int,

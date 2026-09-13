@@ -291,14 +291,20 @@ pub async fn run_server_with_listener(
     static_dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     // Причину отказа Vulkan логируем, а не теряем: без неё не понять, почему нет GPU
-    let vk_ctx = match VulkanContext::init(true) {
-        Ok(ctx) => {
-            info!("Vulkan-устройство: {}", ctx.device_name());
-            Some(ctx)
-        }
-        Err(err) => {
-            warn!("Vulkan недоступен ({err}), сервер работает без GPU");
-            None
+    let vk_ctx = if sloth_vulkan_sys::BACKEND == sloth_vulkan_sys::STUB_BACKEND {
+        // CPU-заглушка тоже «инициализируется», но видеокартой не является
+        warn!("SlothForge собран без Vulkan (не найден загрузчик libvulkan), сервер работает без GPU");
+        None
+    } else {
+        match VulkanContext::init(true) {
+            Ok(ctx) => {
+                info!("Vulkan-устройство: {}", ctx.device_name());
+                Some(ctx)
+            }
+            Err(err) => {
+                warn!("Vulkan недоступен ({err}), сервер работает без GPU");
+                None
+            }
         }
     };
 

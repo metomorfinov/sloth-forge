@@ -1,8 +1,14 @@
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
+/* CPU-заглушка Vulkan-слоя: собирается, когда загрузчик Vulkan не найден (или SLOTH_VULKAN=stub).
+ *
+ * Считает то же, что шейдеры, в той же раскладке матриц и с той же семантикой, поэтому код
+ * поверх неё ведёт себя как на видеокарте. Раньше заглушка хранила LoRA транспонированной
+ * (A [in, rank] вместо [rank, in]), накапливала градиенты вместо перезаписи и выдавала себя
+ * за видеокарту на 4 ГиБ. Проверяется тем же тестом tests/gpu_vs_cpu.rs, что и GPU. */
+
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include "../../include/sloth_vulkan.h"
 
 #define MAX_BUFFERS 4096
@@ -10,14 +16,26 @@
 typedef struct {
     void* ptr;
     size_t size;
-    int is_device_local;
     int in_use;
 } BufferEntry;
 
 static BufferEntry g_buffers[MAX_BUFFERS] = {0};
-static uint64_t g_used_vram = 0;
-static const uint64_t TOTAL_VRAM = 4ULL * 1024ULL * 1024ULL * 1024ULL; // 4 GiB (RX 570)
+static uint64_t g_allocated_bytes = 0;
 static int g_initialized = 0;
+
+static BufferEntry* find_entry(SlothBufferHandle handle) {
+    if (handle == SLOTH_NULL_BUFFER || handle >= MAX_BUFFERS || !g_buffers[handle].in_use) {
+        return NULL;
+    }
+    return &g_buffers[handle];
+}
+
+/* Указатель на массив float, если буфер существует и вмещает count элементов. */
+static float* float_array(SlothBufferHandle handle, size_t count) {
+    BufferEntry* entry = find_entry(handle);
+    if (!entry || entry->size / sizeof(float) < count) return NULL;
+    return (float*)entry->ptr;
+}
 
 int sloth_vk_init(int prefer_discrete, char* out_device_name, size_t max_len) {
     (void)prefer_discrete;
@@ -33,33 +51,38 @@ int sloth_vk_init(int prefer_discrete, char* out_device_name, size_t max_len) {
 
 void sloth_vk_shutdown(void) {
     for (size_t i = 1; i < MAX_BUFFERS; ++i) {
-        if (g_buffers[i].in_use && g_buffers[i].ptr) {
+        if (g_buffers[i].in_use) {
             free(g_buffers[i].ptr);
             g_buffers[i].ptr = NULL;
+            g_buffers[i].size = 0;
             g_buffers[i].in_use = 0;
         }
     }
-    g_used_vram = 0;
+    g_allocated_bytes = 0;
     g_initialized = 0;
 }
 
 int sloth_vk_get_vram_info(uint64_t* total_bytes, uint64_t* used_bytes, uint64_t* free_bytes) {
-    if (total_bytes) *total_bytes = TOTAL_VRAM;
-    if (used_bytes) *used_bytes = g_used_vram;
-    if (free_bytes) *free_bytes = (TOTAL_VRAM > g_used_vram) ? (TOTAL_VRAM - g_used_vram) : 0;
+    if (!g_initialized) return SLOTH_VK_ERROR_NOT_INITIALIZED;
+    /* Видеопамяти нет: общий объём 0, а «занято» — сколько выделено в обычной памяти */
+    if (total_bytes) *total_bytes = 0;
+    if (used_bytes) *used_bytes = g_allocated_bytes;
+    if (free_bytes) *free_bytes = 0;
     return SLOTH_VK_SUCCESS;
 }
 
 SlothBufferHandle sloth_vk_alloc_buffer(size_t size_bytes, int is_device_local) {
+    (void)is_device_local;
+    if (!g_initialized) return SLOTH_NULL_BUFFER;
     for (size_t i = 1; i < MAX_BUFFERS; ++i) {
         if (!g_buffers[i].in_use) {
-            void* p = calloc(1, size_bytes);
+            /* calloc(0) может вернуть NULL, а пустой буфер — допустимый запрос */
+            void* p = calloc(1, size_bytes > 0 ? size_bytes : 1);
             if (!p) return SLOTH_NULL_BUFFER;
             g_buffers[i].ptr = p;
             g_buffers[i].size = size_bytes;
-            g_buffers[i].is_device_local = is_device_local;
             g_buffers[i].in_use = 1;
-            g_used_vram += size_bytes;
+            g_allocated_bytes += size_bytes;
             return (SlothBufferHandle)i;
         }
     }
@@ -67,165 +90,153 @@ SlothBufferHandle sloth_vk_alloc_buffer(size_t size_bytes, int is_device_local) 
 }
 
 void sloth_vk_free_buffer(SlothBufferHandle handle) {
-    if (handle > 0 && handle < MAX_BUFFERS && g_buffers[handle].in_use) {
-        if (g_used_vram >= g_buffers[handle].size) {
-            g_used_vram -= g_buffers[handle].size;
-        } else {
-            g_used_vram = 0;
-        }
-        free(g_buffers[handle].ptr);
-        g_buffers[handle].ptr = NULL;
-        g_buffers[handle].size = 0;
-        g_buffers[handle].in_use = 0;
-    }
+    BufferEntry* entry = find_entry(handle);
+    if (!entry) return;
+    g_allocated_bytes = g_allocated_bytes >= entry->size ? g_allocated_bytes - entry->size : 0;
+    free(entry->ptr);
+    entry->ptr = NULL;
+    entry->size = 0;
+    entry->in_use = 0;
 }
 
 int sloth_vk_write_buffer(SlothBufferHandle handle, const void* src, size_t size_bytes) {
-    if (handle == 0 || handle >= MAX_BUFFERS || !g_buffers[handle].in_use || !src) {
-        return SLOTH_VK_ERROR_INVALID_PARAM;
-    }
-    size_t to_copy = (size_bytes <= g_buffers[handle].size) ? size_bytes : g_buffers[handle].size;
-    memcpy(g_buffers[handle].ptr, src, to_copy);
+    if (!src || size_bytes == 0) return SLOTH_VK_SUCCESS;
+    BufferEntry* entry = find_entry(handle);
+    /* Как на GPU: запись больше буфера — ошибка, а не молчаливое обрезание */
+    if (!entry || size_bytes > entry->size) return SLOTH_VK_ERROR_INVALID_PARAM;
+    memcpy(entry->ptr, src, size_bytes);
     return SLOTH_VK_SUCCESS;
 }
 
 int sloth_vk_read_buffer(SlothBufferHandle handle, void* dst, size_t size_bytes) {
-    if (handle == 0 || handle >= MAX_BUFFERS || !g_buffers[handle].in_use || !dst) {
-        return SLOTH_VK_ERROR_INVALID_PARAM;
-    }
-    size_t to_copy = (size_bytes <= g_buffers[handle].size) ? size_bytes : g_buffers[handle].size;
-    memcpy(dst, g_buffers[handle].ptr, to_copy);
+    if (!dst || size_bytes == 0) return SLOTH_VK_SUCCESS;
+    BufferEntry* entry = find_entry(handle);
+    if (!entry || size_bytes > entry->size) return SLOTH_VK_ERROR_INVALID_PARAM;
+    memcpy(dst, entry->ptr, size_bytes);
     return SLOTH_VK_SUCCESS;
 }
 
 int sloth_vk_forward_gemm(SlothBufferHandle A, SlothBufferHandle B, SlothBufferHandle C, uint32_t M, uint32_t K, uint32_t N) {
-    if (A == 0 || B == 0 || C == 0 || A >= MAX_BUFFERS || B >= MAX_BUFFERS || C >= MAX_BUFFERS) {
-        return SLOTH_VK_ERROR_INVALID_PARAM;
-    }
-    const float* a_ptr = (const float*)g_buffers[A].ptr;
-    const float* b_ptr = (const float*)g_buffers[B].ptr;
-    float* c_ptr = (float*)g_buffers[C].ptr;
-    if (!a_ptr || !b_ptr || !c_ptr) return SLOTH_VK_ERROR_INVALID_PARAM;
+    if (M == 0 || K == 0 || N == 0) return SLOTH_VK_SUCCESS;
+    const float* a = float_array(A, (size_t)M * K);
+    const float* b = float_array(B, (size_t)K * N);
+    float* c = float_array(C, (size_t)M * N);
+    if (!a || !b || !c) return SLOTH_VK_ERROR_INVALID_PARAM;
 
-    for (uint32_t m = 0; m < M; ++m) {
-        for (uint32_t n = 0; n < N; ++n) {
+    for (size_t m = 0; m < M; ++m) {
+        for (size_t n = 0; n < N; ++n) {
             double sum = 0.0;
-            for (uint32_t k = 0; k < K; ++k) {
-                sum += (double)a_ptr[m * K + k] * (double)b_ptr[k * N + n];
+            for (size_t k = 0; k < K; ++k) {
+                sum += (double)a[m * K + k] * (double)b[k * N + n];
             }
-            c_ptr[m * N + n] = (float)sum;
+            c[m * N + n] = (float)sum;
         }
     }
     return SLOTH_VK_SUCCESS;
 }
 
-int sloth_vk_forward_lora(SlothBufferHandle X, SlothBufferHandle W_base, SlothBufferHandle A_lora, SlothBufferHandle B_lora, SlothBufferHandle Out, uint32_t batch, uint32_t seq, uint32_t in_dim, uint32_t out_dim, uint32_t rank, float alpha) {
-    if (!X || !A_lora || !B_lora || !Out) return SLOTH_VK_ERROR_INVALID_PARAM;
-    uint32_t T = batch * seq;
-    const float* x_ptr = (const float*)g_buffers[X].ptr;
-    const float* w_ptr = W_base ? (const float*)g_buffers[W_base].ptr : NULL;
-    const float* a_ptr = (const float*)g_buffers[A_lora].ptr;
-    const float* b_ptr = (const float*)g_buffers[B_lora].ptr;
-    float* out_ptr = (float*)g_buffers[Out].ptr;
-    if (!x_ptr || !a_ptr || !b_ptr || !out_ptr) return SLOTH_VK_ERROR_INVALID_PARAM;
-
-    float scale = (rank > 0) ? (alpha / (float)rank) : 1.0f;
-    float* h = (float*)malloc(T * rank * sizeof(float));
-    if (!h) return SLOTH_VK_ERROR_OUT_OF_MEMORY;
-
-    // h = X * A (X: T x in_dim, A: in_dim x rank)
-    for (uint32_t t = 0; t < T; ++t) {
-        for (uint32_t r = 0; r < rank; ++r) {
+/* h[t, r] = (A x_t)[r] в раскладке PEFT: A [rank, in_dim]. */
+static void lora_project_down(const float* x, const float* a, float* h, size_t tokens, size_t in_dim, size_t rank) {
+    for (size_t t = 0; t < tokens; ++t) {
+        for (size_t r = 0; r < rank; ++r) {
             double sum = 0.0;
-            for (uint32_t i = 0; i < in_dim; ++i) {
-                sum += (double)x_ptr[t * in_dim + i] * (double)a_ptr[i * rank + r];
+            for (size_t i = 0; i < in_dim; ++i) {
+                sum += (double)x[t * in_dim + i] * (double)a[r * in_dim + i];
             }
             h[t * rank + r] = (float)sum;
         }
     }
+}
 
-    // Out = X * W_base + scale * h * B
-    for (uint32_t t = 0; t < T; ++t) {
-        for (uint32_t o = 0; o < out_dim; ++o) {
-            double base_val = 0.0;
-            if (w_ptr) {
-                for (uint32_t i = 0; i < in_dim; ++i) {
-                    base_val += (double)x_ptr[t * in_dim + i] * (double)w_ptr[i * out_dim + o];
+int sloth_vk_forward_lora(SlothBufferHandle X, SlothBufferHandle W_base, SlothBufferHandle A_lora, SlothBufferHandle B_lora, SlothBufferHandle Out, uint32_t batch, uint32_t seq, uint32_t in_dim, uint32_t out_dim, uint32_t rank, float alpha) {
+    size_t tokens = (size_t)batch * seq;
+    if (tokens == 0 || in_dim == 0 || out_dim == 0) return SLOTH_VK_SUCCESS;
+    if (rank > SLOTH_VK_LORA_MAX_RANK) return SLOTH_VK_ERROR_INVALID_PARAM;
+
+    const float* x = float_array(X, tokens * in_dim);
+    const float* w = float_array(W_base, (size_t)out_dim * in_dim);
+    const float* a = float_array(A_lora, (size_t)rank * in_dim);
+    const float* b = float_array(B_lora, (size_t)out_dim * rank);
+    float* out = float_array(Out, tokens * out_dim);
+    if (!x || !a || !b || !out) return SLOTH_VK_ERROR_INVALID_PARAM;
+    /* Нулевой дескриптор W означает «без базового веса», неверный — ошибка */
+    if (W_base != SLOTH_NULL_BUFFER && !w) return SLOTH_VK_ERROR_INVALID_PARAM;
+
+    float scale = rank > 0 ? alpha / (float)rank : 0.0f;
+    float* h = (float*)malloc((tokens * rank > 0 ? tokens * rank : 1) * sizeof(float));
+    if (!h) return SLOTH_VK_ERROR_OUT_OF_MEMORY;
+    lora_project_down(x, a, h, tokens, in_dim, rank);
+
+    /* Out[t, o] = (W x_t)[o] + scale * (B h_t)[o]; W [out_dim, in_dim], B [out_dim, rank] */
+    for (size_t t = 0; t < tokens; ++t) {
+        for (size_t o = 0; o < out_dim; ++o) {
+            double base = 0.0;
+            if (w) {
+                for (size_t i = 0; i < in_dim; ++i) {
+                    base += (double)x[t * in_dim + i] * (double)w[o * in_dim + i];
                 }
             }
-            double lora_val = 0.0;
-            for (uint32_t r = 0; r < rank; ++r) {
-                lora_val += (double)h[t * rank + r] * (double)b_ptr[r * out_dim + o];
+            double lora = 0.0;
+            for (size_t r = 0; r < rank; ++r) {
+                lora += (double)b[o * rank + r] * (double)h[t * rank + r];
             }
-            out_ptr[t * out_dim + o] = (float)(base_val + scale * lora_val);
+            out[t * out_dim + o] = (float)(base + scale * lora);
         }
     }
-
     free(h);
     return SLOTH_VK_SUCCESS;
 }
 
 int sloth_vk_backward_lora(SlothBufferHandle X, SlothBufferHandle dOut, SlothBufferHandle A_lora, SlothBufferHandle B_lora, SlothBufferHandle dA_grad, SlothBufferHandle dB_grad, uint32_t batch, uint32_t seq, uint32_t in_dim, uint32_t out_dim, uint32_t rank, float alpha) {
-    if (!X || !dOut || !A_lora || !B_lora || !dA_grad || !dB_grad) return SLOTH_VK_ERROR_INVALID_PARAM;
-    uint32_t T = batch * seq;
-    const float* x_ptr = (const float*)g_buffers[X].ptr;
-    const float* dout_ptr = (const float*)g_buffers[dOut].ptr;
-    const float* a_ptr = (const float*)g_buffers[A_lora].ptr;
-    const float* b_ptr = (const float*)g_buffers[B_lora].ptr;
-    float* da_ptr = (float*)g_buffers[dA_grad].ptr;
-    float* db_ptr = (float*)g_buffers[dB_grad].ptr;
-    if (!x_ptr || !dout_ptr || !a_ptr || !b_ptr || !da_ptr || !db_ptr) return SLOTH_VK_ERROR_INVALID_PARAM;
+    size_t tokens = (size_t)batch * seq;
+    if (tokens == 0 || in_dim == 0 || out_dim == 0 || rank == 0) return SLOTH_VK_SUCCESS;
 
-    float scale = (rank > 0) ? (alpha / (float)rank) : 1.0f;
-    float* h = (float*)malloc(T * rank * sizeof(float));
-    float* dh = (float*)malloc(T * rank * sizeof(float));
+    const float* x = float_array(X, tokens * in_dim);
+    const float* dout = float_array(dOut, tokens * out_dim);
+    const float* a = float_array(A_lora, (size_t)rank * in_dim);
+    const float* b = float_array(B_lora, (size_t)out_dim * rank);
+    float* da = float_array(dA_grad, (size_t)rank * in_dim);
+    float* db = float_array(dB_grad, (size_t)out_dim * rank);
+    if (!x || !dout || !a || !b || !da || !db) return SLOTH_VK_ERROR_INVALID_PARAM;
+
+    float scale = alpha / (float)rank;
+    float* h = (float*)malloc(tokens * rank * sizeof(float));
+    float* dh = (float*)malloc(tokens * rank * sizeof(float));
     if (!h || !dh) {
-        if (h) free(h);
-        if (dh) free(dh);
+        free(h);
+        free(dh);
         return SLOTH_VK_ERROR_OUT_OF_MEMORY;
     }
+    lora_project_down(x, a, h, tokens, in_dim, rank);
 
-    // 1. Forward intermediate: h = X * A (T x rank)
-    for (uint32_t t = 0; t < T; ++t) {
-        for (uint32_t r = 0; r < rank; ++r) {
+    /* dh[t, r] = (B^T dOut_t)[r] */
+    for (size_t t = 0; t < tokens; ++t) {
+        for (size_t r = 0; r < rank; ++r) {
             double sum = 0.0;
-            for (uint32_t i = 0; i < in_dim; ++i) {
-                sum += (double)x_ptr[t * in_dim + i] * (double)a_ptr[i * rank + r];
+            for (size_t o = 0; o < out_dim; ++o) {
+                sum += (double)dout[t * out_dim + o] * (double)b[o * rank + r];
             }
-            h[t * rank + r] = (float)sum;
+            dh[t * rank + r] = (float)sum;
         }
     }
 
-    // 2. dB_grad = scale * (h^T * dOut)
-    for (uint32_t r = 0; r < rank; ++r) {
-        for (uint32_t o = 0; o < out_dim; ++o) {
+    /* Как шейдер, градиенты перезаписываются: накопление между микробатчами — дело вызывающего */
+    for (size_t o = 0; o < out_dim; ++o) {
+        for (size_t r = 0; r < rank; ++r) {
             double sum = 0.0;
-            for (uint32_t t = 0; t < T; ++t) {
-                sum += (double)h[t * rank + r] * (double)dout_ptr[t * out_dim + o];
+            for (size_t t = 0; t < tokens; ++t) {
+                sum += (double)dout[t * out_dim + o] * (double)h[t * rank + r];
             }
-            db_ptr[r * out_dim + o] += (float)(scale * sum);
+            db[o * rank + r] = (float)(scale * sum);
         }
     }
-
-    // 3. dh = scale * (dOut * B^T)
-    for (uint32_t t = 0; t < T; ++t) {
-        for (uint32_t r = 0; r < rank; ++r) {
+    for (size_t r = 0; r < rank; ++r) {
+        for (size_t i = 0; i < in_dim; ++i) {
             double sum = 0.0;
-            for (uint32_t o = 0; o < out_dim; ++o) {
-                sum += (double)dout_ptr[t * out_dim + o] * (double)b_ptr[r * out_dim + o];
+            for (size_t t = 0; t < tokens; ++t) {
+                sum += (double)dh[t * rank + r] * (double)x[t * in_dim + i];
             }
-            dh[t * rank + r] = (float)(scale * sum);
-        }
-    }
-
-    // 4. dA_grad = X^T * dh
-    for (uint32_t i = 0; i < in_dim; ++i) {
-        for (uint32_t r = 0; r < rank; ++r) {
-            double sum = 0.0;
-            for (uint32_t t = 0; t < T; ++t) {
-                sum += (double)x_ptr[t * in_dim + i] * (double)dh[t * rank + r];
-            }
-            da_ptr[i * rank + r] += (float)sum;
+            da[r * in_dim + i] = (float)(scale * sum);
         }
     }
 
@@ -235,11 +246,11 @@ int sloth_vk_backward_lora(SlothBufferHandle X, SlothBufferHandle dOut, SlothBuf
 }
 
 int sloth_vk_adamw_step(SlothBufferHandle Weights, SlothBufferHandle Grads, SlothBufferHandle M_state, SlothBufferHandle V_state, uint32_t num_elements, float lr, float beta1, float beta2, float eps, float weight_decay, uint32_t step) {
-    if (!Weights || !Grads || !M_state || !V_state) return SLOTH_VK_ERROR_INVALID_PARAM;
-    float* w = (float*)g_buffers[Weights].ptr;
-    const float* g = (const float*)g_buffers[Grads].ptr;
-    float* m = (float*)g_buffers[M_state].ptr;
-    float* v = (float*)g_buffers[V_state].ptr;
+    if (num_elements == 0) return SLOTH_VK_SUCCESS;
+    float* w = float_array(Weights, num_elements);
+    const float* g = float_array(Grads, num_elements);
+    float* m = float_array(M_state, num_elements);
+    float* v = float_array(V_state, num_elements);
     if (!w || !g || !m || !v) return SLOTH_VK_ERROR_INVALID_PARAM;
 
     float bias_correction1 = 1.0f - powf(beta1, (float)step);
@@ -247,72 +258,68 @@ int sloth_vk_adamw_step(SlothBufferHandle Weights, SlothBufferHandle Grads, Slot
     if (bias_correction1 <= 0.0f) bias_correction1 = 1e-7f;
     if (bias_correction2 <= 0.0f) bias_correction2 = 1e-7f;
 
-    for (uint32_t i = 0; i < num_elements; ++i) {
-        // Weight decay
+    for (size_t i = 0; i < num_elements; ++i) {
         w[i] -= lr * weight_decay * w[i];
-
-        // Momentum updates
         m[i] = beta1 * m[i] + (1.0f - beta1) * g[i];
         v[i] = beta2 * v[i] + (1.0f - beta2) * (g[i] * g[i]);
-
-        // Bias-corrected estimates
         float m_hat = m[i] / bias_correction1;
         float v_hat = v[i] / bias_correction2;
-
-        // Parameter update
         w[i] -= lr * m_hat / (sqrtf(v_hat) + eps);
     }
     return SLOTH_VK_SUCCESS;
 }
 
+/* 1 / sqrt(mean(x^2) + eps) для строки длины dim. */
+static float inverse_rms(const float* row, size_t dim, float eps) {
+    double sum_sq = 0.0;
+    for (size_t d = 0; d < dim; ++d) {
+        sum_sq += (double)row[d] * (double)row[d];
+    }
+    return 1.0f / sqrtf((float)(sum_sq / (double)dim) + eps);
+}
+
 int sloth_vk_rmsnorm_forward(SlothBufferHandle X, SlothBufferHandle Gamma, SlothBufferHandle Out, uint32_t batch_seq, uint32_t dim, float eps) {
-    if (!X || !Gamma || !Out) return SLOTH_VK_ERROR_INVALID_PARAM;
-    const float* x = (const float*)g_buffers[X].ptr;
-    const float* gamma = (const float*)g_buffers[Gamma].ptr;
-    float* out = (float*)g_buffers[Out].ptr;
+    if (batch_seq == 0 || dim == 0) return SLOTH_VK_SUCCESS;
+    const float* x = float_array(X, (size_t)batch_seq * dim);
+    const float* gamma = float_array(Gamma, dim);
+    float* out = float_array(Out, (size_t)batch_seq * dim);
     if (!x || !gamma || !out) return SLOTH_VK_ERROR_INVALID_PARAM;
 
-    for (uint32_t b = 0; b < batch_seq; ++b) {
-        double sum_sq = 0.0;
-        for (uint32_t d = 0; d < dim; ++d) {
-            float val = x[b * dim + d];
-            sum_sq += (double)(val * val);
-        }
-        float rms = 1.0f / sqrtf((float)(sum_sq / dim) + eps);
-        for (uint32_t d = 0; d < dim; ++d) {
-            out[b * dim + d] = x[b * dim + d] * rms * gamma[d];
+    for (size_t t = 0; t < batch_seq; ++t) {
+        const float* row = x + t * dim;
+        float inv_rms = inverse_rms(row, dim, eps);
+        for (size_t d = 0; d < dim; ++d) {
+            out[t * dim + d] = row[d] * inv_rms * gamma[d];
         }
     }
     return SLOTH_VK_SUCCESS;
 }
 
 int sloth_vk_rmsnorm_backward(SlothBufferHandle dOut, SlothBufferHandle X, SlothBufferHandle Gamma, SlothBufferHandle dX, SlothBufferHandle dGamma, uint32_t batch_seq, uint32_t dim, float eps) {
-    if (!dOut || !X || !Gamma || !dX || !dGamma) return SLOTH_VK_ERROR_INVALID_PARAM;
-    const float* dout = (const float*)g_buffers[dOut].ptr;
-    const float* x = (const float*)g_buffers[X].ptr;
-    const float* gamma = (const float*)g_buffers[Gamma].ptr;
-    float* dx = (float*)g_buffers[dX].ptr;
-    float* dgamma = (float*)g_buffers[dGamma].ptr;
+    if (batch_seq == 0 || dim == 0) return SLOTH_VK_SUCCESS;
+    size_t total = (size_t)batch_seq * dim;
+    const float* dout = float_array(dOut, total);
+    const float* x = float_array(X, total);
+    const float* gamma = float_array(Gamma, dim);
+    float* dx = float_array(dX, total);
+    float* dgamma = float_array(dGamma, dim);
     if (!dout || !x || !gamma || !dx || !dgamma) return SLOTH_VK_ERROR_INVALID_PARAM;
 
-    for (uint32_t b = 0; b < batch_seq; ++b) {
-        double sum_sq = 0.0;
-        for (uint32_t d = 0; d < dim; ++d) {
-            float val = x[b * dim + d];
-            sum_sq += (double)(val * val);
-        }
-        float mean_sq = (float)(sum_sq / dim) + eps;
-        float rms = 1.0f / sqrtf(mean_sq);
-        float rms3 = rms * rms * rms;
+    /* Как шейдер, dGamma перезаписывается */
+    memset(dgamma, 0, (size_t)dim * sizeof(float));
+    for (size_t t = 0; t < batch_seq; ++t) {
+        const float* row = x + t * dim;
+        const float* grad_row = dout + t * dim;
+        float inv_rms = inverse_rms(row, dim, eps);
+        float inv_rms3 = inv_rms * inv_rms * inv_rms;
 
-        double sum_dout_gamma_x = 0.0;
-        for (uint32_t d = 0; d < dim; ++d) {
-            sum_dout_gamma_x += (double)(dout[b * dim + d] * gamma[d] * x[b * dim + d]);
-            dgamma[d] += dout[b * dim + d] * x[b * dim + d] * rms;
+        double dot = 0.0;
+        for (size_t d = 0; d < dim; ++d) {
+            dot += (double)grad_row[d] * (double)gamma[d] * (double)row[d];
+            dgamma[d] += grad_row[d] * row[d] * inv_rms;
         }
-
-        for (uint32_t d = 0; d < dim; ++d) {
-            dx[b * dim + d] = (dout[b * dim + d] * gamma[d] * rms) - (float)(x[b * dim + d] * rms3 * sum_dout_gamma_x / dim);
+        for (size_t d = 0; d < dim; ++d) {
+            dx[t * dim + d] = grad_row[d] * gamma[d] * inv_rms - (float)((double)row[d] * inv_rms3 * dot / (double)dim);
         }
     }
     return SLOTH_VK_SUCCESS;

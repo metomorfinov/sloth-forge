@@ -108,15 +108,19 @@ SLOTH_VK_API int sloth_vk_forward_gemm(
     uint32_t N
 );
 
+/* Наибольший ранг для sloth_vk_forward_lora: шейдер держит промежуточный вектор в массиве
+   фиксированного размера. Больший ранг возвращает SLOTH_VK_ERROR_INVALID_PARAM. */
+#define SLOTH_VK_LORA_MAX_RANK 128
+
 /**
- * @brief Fused forward LoRA calculation: Out = X * W_base + (alpha / rank) * (X * A_lora) * B_lora
+ * @brief Прямой проход LoRA: Out[t] = W_base x_t + (alpha / rank) * B_lora (A_lora x_t)
  *
- * Matrix shapes:
- * X: (batch * seq, in_dim)
- * W_base: (in_dim, out_dim) or (out_dim, in_dim) based on config
- * A_lora: (in_dim, rank) or (rank, in_dim)
- * B_lora: (rank, out_dim) or (out_dim, rank)
- * Out: (batch * seq, out_dim)
+ * Все матрицы float32, построчно, в раскладке PyTorch/PEFT:
+ * X:      (batch * seq, in_dim)
+ * W_base: (out_dim, in_dim), SLOTH_NULL_BUFFER — без базового веса
+ * A_lora: (rank, in_dim)
+ * B_lora: (out_dim, rank)
+ * Out:    (batch * seq, out_dim)
  */
 SLOTH_VK_API int sloth_vk_forward_lora(
     SlothBufferHandle X,
@@ -133,13 +137,13 @@ SLOTH_VK_API int sloth_vk_forward_lora(
 );
 
 /**
- * @brief LoRA backward calculating dA and dB gradients directly in VRAM.
+ * @brief Обратный проход LoRA: градиенты dA и dB прямо в видеопамяти.
  *
- * Computes:
- * intermediate h = X * A_lora (or A * x)
- * dB_grad = (alpha / rank) * (h^T * dOut)
- * dh = (alpha / rank) * (dOut * B_lora^T)
- * dA_grad = X^T * dh
+ * Раскладка как у sloth_vk_forward_lora; dA_grad (rank, in_dim), dB_grad (out_dim, rank).
+ * h_t = A_lora x_t, scale = alpha / rank:
+ * dB_grad[o, r] = scale * sum_t dOut[t, o] * h_t[r]
+ * dA_grad[r, i] = scale * sum_t (B_lora^T dOut_t)[r] * x_t[i]
+ * Градиенты ПЕРЕЗАПИСЫВАЮТСЯ; накопление между микробатчами делает вызывающий код.
  */
 SLOTH_VK_API int sloth_vk_backward_lora(
     SlothBufferHandle X,
