@@ -5,7 +5,6 @@ use sloth_server::state::AppState;
 use sloth_vulkan_sys::VulkanContext;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 async fn spawn_test_server() -> (String, Arc<AppState>) {
     let vk_ctx = VulkanContext::init(true).ok();
@@ -113,101 +112,6 @@ async fn test_get_models() {
 }
 
 #[tokio::test]
-async fn test_training_beginner_preset_start_stop_status() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // 1. Initial status should be idle
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["active"].as_bool(), Some(false));
-
-    // 2. Start training with beginner preset "style"
-    let start_payload = serde_json::json!({
-        "mode": "beginner",
-        "preset": "style",
-        "intensity": "normal",
-        "total_steps": 100
-    });
-
-    let resp = client
-        .post(format!("{base_url}/api/train/start"))
-        .json(&start_payload)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
-    assert_eq!(start_resp["loraRank"].as_u64().or_else(|| start_resp["lora_rank"].as_u64()), Some(16));
-
-    // Let the training loop execute a couple steps
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    // 3. Status should now be active
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["active"].as_bool(), Some(true));
-    let step = status["step"].as_u64().unwrap();
-    assert!(step > 0);
-    let loss = status["loss"].as_f64().unwrap();
-    assert!(loss > 0.0);
-    let tok_s = status["tokensPerSec"].as_f64().or_else(|| status["tokens_per_sec"].as_f64()).unwrap();
-    assert!(tok_s > 1000.0);
-
-    // 4. Stop training
-    let resp = client
-        .post(format!("{base_url}/api/train/stop"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let stop_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(stop_resp["status"].as_str(), Some("stopped"));
-
-    // 5. Verify stopped status
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["active"].as_bool(), Some(false));
-}
-
-#[tokio::test]
-async fn test_training_pro_hyperparameters() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    let pro_payload = serde_json::json!({
-        "mode": "pro",
-        "loraRank": 32,
-        "loraAlpha": 64.0,
-        "learningRate": 0.0001,
-        "weightDecay": 0.01,
-        "targetModules": ["q_proj", "v_proj", "o_proj"],
-        "totalSteps": 50
-    });
-
-    let resp = client
-        .post(format!("{base_url}/api/train/start"))
-        .json(&pro_payload)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
-    assert_eq!(start_resp["loraRank"].as_u64().or_else(|| start_resp["lora_rank"].as_u64()), Some(32));
-
-    // Halt
-    let resp = client.post(format!("{base_url}/api/train/stop")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-}
-
-#[tokio::test]
 async fn test_ws_telemetry() {
     let (base_url, _) = spawn_test_server().await;
     let ws_url = base_url.replace("http://", "ws://") + "/ws/telemetry";
@@ -226,7 +130,9 @@ async fn test_ws_telemetry() {
     let second = ws_stream.next().await.unwrap().unwrap();
     assert!(second.is_text());
     let second_text = second.into_text().unwrap();
-    assert!(second_text.contains("telemetry") || second_text.contains("vramUsedMb") || second_text.contains("vram_used_mb"));
+    // Второе сообщение — текущий статус обучения (раньше — выдуманные температура и VRAM)
+    assert!(second_text.contains("\"training\""), "{second_text}");
+    assert!(second_text.contains("\"phase\":\"idle\""), "{second_text}");
 }
 
 #[tokio::test]
@@ -484,147 +390,6 @@ async fn test_unsloth_models_and_model_picker_schema() {
     let local: serde_json::Value = resp_local.json().await.unwrap();
     assert!(local["models_dir"].is_string());
     assert_eq!(local["models"][0]["source"].as_str(), Some("models_dir"));
-}
-
-#[tokio::test]
-async fn test_unsloth_training_status_and_progress_endpoints() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // 1. GET /api/train/status
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let status: serde_json::Value = resp.json().await.unwrap();
-
-    assert!(status["job_id"].as_str().is_some());
-    assert_eq!(status["phase"].as_str(), Some("idle"));
-    assert_eq!(status["is_training_running"].as_bool(), Some(false));
-    assert_eq!(status["eval_enabled"].as_bool(), Some(false));
-    assert!(status["message"].as_str().is_some());
-    assert!(status["warnings"].as_array().is_some());
-
-    // 2. GET /api/train/progress as JSON
-    let resp = client.get(format!("{base_url}/api/train/progress")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let prog: serde_json::Value = resp.json().await.unwrap();
-    assert!(prog["job_id"].as_str().is_some());
-    assert_eq!(prog["phase"].as_str(), Some("idle"));
-
-    // 3. GET /api/train/progress with text/event-stream header
-    let resp = client
-        .get(format!("{base_url}/api/train/progress?expected_job_id=test-job-123"))
-        .header("Accept", "text/event-stream")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
-    assert!(ct.contains("text/event-stream"));
-}
-
-#[tokio::test]
-async fn test_unsloth_training_start_stop_reset() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // Start with Unsloth request payload format (snake_case, string lr)
-    let start_payload = serde_json::json!({
-        "model_name": "Llama-3.2-3B-Instruct",
-        "hf_dataset": "yahma/alpaca-cleaned",
-        "project_name": "test-project",
-        "training_type": "sft",
-        "learning_rate": "2e-4",
-        "lora_r": 16,
-        "lora_alpha": 32.0,
-        "batch_size": 1,
-        "gradient_accumulation_steps": 4,
-        "max_steps": 50,
-        "start_request_id": "req-unsloth-001"
-    });
-
-    let resp = client
-        .post(format!("{base_url}/api/train/start"))
-        .json(&start_payload)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let start_resp: serde_json::Value = resp.json().await.unwrap();
-    assert!(start_resp["job_id"].as_str().is_some() || start_resp["jobId"].as_str().is_some());
-    assert!(start_resp["status"].as_str() == Some("queued") || start_resp["status"].as_str() == Some("started"));
-
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    // Check status is training
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["is_training_running"].as_bool(), Some(true));
-    assert_eq!(status["phase"].as_str(), Some("training"));
-
-    // Stop
-    let resp = client.post(format!("{base_url}/api/train/stop")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let stop_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(stop_resp["status"].as_str(), Some("stopped"));
-
-    // Reset
-    let resp = client.post(format!("{base_url}/api/train/reset")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let reset_resp: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(reset_resp["status"].as_str(), Some("ok"));
-
-    // Status after reset should be idle
-    let resp = client.get(format!("{base_url}/api/train/status")).send().await.unwrap();
-    let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["is_training_running"].as_bool(), Some(false));
-    assert_eq!(status["phase"].as_str(), Some("idle"));
-    assert_eq!(status["step"].as_u64(), Some(0));
-}
-
-#[tokio::test]
-async fn test_unsloth_training_runs_history() {
-    let (base_url, _) = spawn_test_server().await;
-    let client = reqwest::Client::new();
-
-    // 1. Initial GET /api/train/runs
-    let resp = client.get(format!("{base_url}/api/train/runs")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["runs"].as_array().is_some());
-    assert!(body["total"].as_u64().is_some());
-
-    // 2. Start a run
-    let start_payload = serde_json::json!({
-        "model_name": "Llama-3.2-3B-Instruct",
-        "dataset": "sloth-alpaca",
-        "total_steps": 25,
-        "mode": "beginner",
-        "preset": "style"
-    });
-    let _ = client.post(format!("{base_url}/api/train/start")).json(&start_payload).send().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let _ = client.post(format!("{base_url}/api/train/stop")).send().await.unwrap();
-
-    // 3. GET /api/train/runs should now contain the run
-    let resp = client.get(format!("{base_url}/api/train/runs")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let runs = body["runs"].as_array().unwrap();
-    assert!(!runs.is_empty());
-    let run = &runs[0];
-    assert!(run["id"].as_str().is_some());
-    assert_eq!(run["status"].as_str(), Some("stopped"));
-    assert!(run["started_at"].as_str().is_some());
-
-    // 4. GET /api/train/runs/:id detail
-    let run_id = run["id"].as_str().unwrap();
-    let resp = client.get(format!("{base_url}/api/train/runs/{run_id}")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let detail: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(detail["run"]["id"].as_str(), Some(run_id));
-    assert!(detail["config"].is_object());
-    assert!(detail["metrics"].is_object());
 }
 
 #[tokio::test]
@@ -1641,12 +1406,10 @@ async fn test_model_picker_and_deep_integration_audit() {
     let tmpl: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(tmpl["model_name"].as_str(), Some("llama-3.2-1b"));
 
-    // 7. Training Start Request Status: GET /api/train/start-requests/:id
+    // 7. Training Start Request Status: неизвестный запрос — 404, а не выдуманное «accepted»
+    //    (жизненный цикл обучения проверяется в training_tests.rs)
     let resp = client.get(format!("{base_url}/api/train/start-requests/req-999")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let req_stat: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(req_stat["start_request_id"].as_str(), Some("req-999"));
-    assert_eq!(req_stat["state"].as_str(), Some("accepted"));
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
     // 8. Delete Impact: POST /api/hub/delete-impact for local model
     let resp = client

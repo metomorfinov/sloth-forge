@@ -1,20 +1,22 @@
-use crate::state::{AppState, WsTelemetryEnvelope};
-use crate::training::{self, TrainStartRequest, TrainStatusResponse};
+use crate::state::AppState;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sloth_vulkan_sys::VramInfo;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
+
+/// Как часто WebSocket повторяет статус обучения, если событий нет.
+const WS_STATUS_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,28 +36,16 @@ pub struct HardwareDetails {
 }
 
 pub async fn handle_vram(State(state): State<Arc<AppState>>) -> Json<VramInfo> {
-    let training_vram = state.training.vram_used_mb.load(Ordering::Relaxed);
-
     if let Some(ctx) = &state.vk_ctx {
-        if let Ok(mut info) = ctx.get_vram_info() {
-            if state.training.is_active.load(Ordering::Relaxed) && training_vram > info.used_mb {
-                info.used_mb = training_vram;
-                info.used_bytes = training_vram * 1024 * 1024;
-                info.free_mb = info.total_mb.saturating_sub(training_vram);
-                info.free_bytes = info.free_mb * 1024 * 1024;
-                info.usage_percent = (info.used_mb as f32 / info.total_mb as f32) * 100.0;
-            }
+        if let Ok(info) = ctx.get_vram_info() {
             return Json(info);
         }
     }
 
-    // Default fallback for AMD Radeon RX 570 Series (RADV POLARIS10)
+    // Default fallback for AMD Radeon RX 570 Series (RADV POLARIS10).
+    // Настоящие числа без Vulkan-контекста — шаг 10 (телеметрия железа)
     let total_mb = 4096u64;
-    let used_mb = if state.training.is_active.load(Ordering::Relaxed) {
-        training_vram
-    } else {
-        1420
-    };
+    let used_mb = 1420;
     let free_mb = total_mb.saturating_sub(used_mb);
     let usage_percent = (used_mb as f32 / total_mb as f32) * 100.0;
 
@@ -82,11 +72,8 @@ pub async fn handle_hardware(State(state): State<Arc<AppState>>) -> Json<Hardwar
     let is_cluster = !workers.is_empty();
     let cluster_vram: u64 = 4096 + workers.iter().map(|w| w.vram_mb).sum::<u64>();
 
-    let vram_used = if state.training.is_active.load(Ordering::Relaxed) {
-        state.training.vram_used_mb.load(Ordering::Relaxed)
-    } else {
-        1420
-    };
+    // Шаг 10: реальная занятость видеопамяти вместо константы
+    let vram_used = 1420;
 
     Json(HardwareDetails {
         gpu_name: "AMD Radeon RX 570".to_string(),
@@ -104,28 +91,6 @@ pub async fn handle_hardware(State(state): State<Arc<AppState>>) -> Json<Hardwar
     })
 }
 
-pub async fn handle_train_start(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<TrainStartRequest>,
-) -> Result<Json<crate::training::TrainStartResponse>, (StatusCode, String)> {
-    match training::start_training(state, req).await {
-        Ok(resp) => Ok(Json(resp)),
-        Err(err) => Err((StatusCode::BAD_REQUEST, err)),
-    }
-}
-
-pub async fn handle_train_stop(
-    State(state): State<Arc<AppState>>,
-) -> Json<crate::training::TrainStopResponse> {
-    Json(training::stop_training(state).await)
-}
-
-pub async fn handle_train_status(
-    State(state): State<Arc<AppState>>,
-) -> Json<TrainStatusResponse> {
-    Json(crate::api::build_training_status(&state).await)
-}
-
 pub async fn handle_ws_telemetry(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -133,66 +98,56 @@ pub async fn handle_ws_telemetry(
     ws.on_upgrade(move |socket| handle_ws_client(socket, state))
 }
 
+async fn send_json(socket: &mut WebSocket, value: &Value) -> Result<(), axum::Error> {
+    socket.send(Message::Text(value.to_string())).await
+}
+
+fn status_message(state: &AppState) -> Value {
+    json!({ "type": "training", "event": "status", "data": state.training.status() })
+}
+
+/// Поток событий обучения по WebSocket: статус при подключении, затем те же события,
+/// что в SSE `/api/train/progress`. Интерфейс этот поток не использует; раньше он
+/// рассылал выдуманные температуру, мощность и загрузку GPU.
 async fn handle_ws_client(mut socket: WebSocket, state: Arc<AppState>) {
-    let mut rx = state.tx_telemetry.subscribe();
+    let mut events = state.training.subscribe();
 
-    // Initial connection welcome & current telemetry snapshot
-    let initial_snapshot = state.training.snapshot("local", 1).await;
-    let welcome = serde_json::json!({
+    let welcome = json!({
         "type": "log",
-        "message": "[SYSTEM] SlothForge live telemetry WebSocket active (Vulkan wavefront-64 RADV)."
+        "message": "[SYSTEM] Поток событий обучения SlothForge подключён"
     });
-    let _ = socket.send(Message::Text(welcome.to_string())).await;
-
-    let snapshot_msg = serde_json::json!({
-        "type": "telemetry",
-        "data": initial_snapshot
-    });
-    if socket.send(Message::Text(snapshot_msg.to_string())).await.is_err() {
+    if send_json(&mut socket, &welcome).await.is_err()
+        || send_json(&mut socket, &status_message(&state)).await.is_err()
+    {
         return;
     }
 
-    // Heartbeat ticker for idle periods (at ~2 Hz when not training)
-    let mut idle_ticker = tokio::time::interval(Duration::from_millis(500));
+    let mut status_ticker = tokio::time::interval(WS_STATUS_INTERVAL);
+    // Первый тик interval срабатывает сразу, а статус только что отправлен
+    status_ticker.tick().await;
 
     loop {
-        tokio::select! {
-            // Live broadcasted telemetry from training loop (10-20 Hz)
-            msg = rx.recv() => {
-                match msg {
-                    Ok(envelope) => {
-                        let text = serde_json::to_string(&envelope).unwrap_or_default();
-                        if socket.send(Message::Text(text)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Skip lagged messages to keep up with real-time stream
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            // Idle background heartbeat when no training is active
-            _ = idle_ticker.tick() => {
-                if !state.training.is_active.load(Ordering::Relaxed) {
-                    let snapshot = state.training.snapshot("local", 1).await;
-                    let envelope = WsTelemetryEnvelope::Telemetry { data: snapshot };
-                    let text = serde_json::to_string(&envelope).unwrap_or_default();
-                    if socket.send(Message::Text(text)).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            // Receive client frames (ping/close)
-            client_frame = socket.next() => {
-                match client_frame {
-                    Some(Ok(Message::Text(_))) | Some(Ok(Message::Ping(_))) => {
-                        // Pong is handled automatically by axum
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
+        let outgoing = tokio::select! {
+            received = events.recv() => match received {
+                Ok(event) => json!({
+                    "type": "training",
+                    "event": event.kind.as_str(),
+                    "id": event.id,
+                    "data": event.payload
+                }),
+                // Клиент не успевал читать: отправляем актуальный статус вместо пропущенного
+                Err(RecvError::Lagged(_)) => status_message(&state),
+                Err(RecvError::Closed) => break,
+            },
+            _ = status_ticker.tick() => status_message(&state),
+            client_frame = socket.next() => match client_frame {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                // Ping/Pong axum обрабатывает сам, остальное клиенту отправлять незачем
+                Some(Ok(_)) => continue,
+            },
+        };
+        if send_json(&mut socket, &outgoing).await.is_err() {
+            break;
         }
     }
 }
