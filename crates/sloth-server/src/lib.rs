@@ -3,6 +3,8 @@ pub mod chat;
 pub mod chat_history;
 pub mod cluster;
 pub mod downloads;
+pub mod gguf_variants;
+pub mod hf_api;
 pub mod error;
 pub mod handlers;
 pub mod hub;
@@ -77,7 +79,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/models/loras", get(api::handle_models_loras))
         .route("/models/download-progress", get(downloads::download_progress))
         .route("/models/gguf-download-progress", get(downloads::gguf_download_progress))
-        .route("/models/gguf-variants", get(hub::handle_gguf_variants))
+        .route("/models/gguf-variants", get(gguf_variants::handle_gguf_variants))
         .route("/models/download", post(downloads::start_download))
         .route("/models/download/cancel", post(downloads::cancel_download))
         .route("/models/download-status", get(downloads::download_status))
@@ -96,7 +98,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/hub/local", get(hub::handle_hub_local))
         .route("/hub/hidden-models", get(hub::handle_hidden_models))
         .route("/hub/active-downloads", get(downloads::active_downloads))
-        .route("/hub/gguf-variants", get(hub::handle_gguf_variants))
+        .route("/hub/gguf-variants", get(gguf_variants::handle_gguf_variants))
         .route("/hub/download", post(downloads::start_download))
         .route("/hub/download/cancel", post(downloads::cancel_download))
         .route("/hub/download-status", get(downloads::download_status))
@@ -107,7 +109,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/hub/scan-folders/:id", delete(hub::handle_hub_delete_scan_folder))
         .route("/hub/delete-impact", get(hub::handle_hub_delete_impact).post(hub::handle_hub_delete_impact_post))
         .route("/hub/orphan-companions", get(hub::handle_hub_orphan_companions))
-        .route("/hub/token/validate", post(hub::handle_token_validate))
+        .route("/hub/token/validate", post(hf_api::validate_token))
         // Datasets
         .route("/hub/datasets/transport-status", get(hub::handle_datasets_transport_status))
         .route("/hub/datasets/cached", get(hub::handle_datasets_cached).delete(hub::handle_datasets_cached_delete))

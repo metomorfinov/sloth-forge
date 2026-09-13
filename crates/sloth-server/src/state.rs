@@ -242,7 +242,8 @@ pub struct AppState {
     /// Адрес Hugging Face (`HF_ENDPOINT`); тесты подменяют его локальным сервером.
     pub hf_endpoint: String,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
-    pub gguf_variants_cache: Arc<RwLock<std::collections::HashMap<String, (Instant, serde_json::Value)>>>,
+    /// Списки файлов репозиториев Hugging Face (живут несколько минут).
+    pub hf_tree_cache: crate::hf_api::TreeCache,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
     /// Постоянное хранилище: история чатов, проекты, настройки, запуски обучения.
     pub store: Arc<crate::store::Store>,
@@ -284,11 +285,9 @@ impl AppState {
             master_gradients,
             training_mutex: Arc::new(Mutex::new(())),
             downloads: crate::downloads::DownloadRegistry::default(),
-            hf_endpoint: std::env::var(crate::downloads::HF_ENDPOINT_ENV)
-                .map(|endpoint| endpoint.trim_end_matches('/').to_string())
-                .unwrap_or_else(|_| crate::downloads::DEFAULT_HF_ENDPOINT.to_string()),
+            hf_endpoint: crate::hf_api::endpoint_from_env(),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
-            gguf_variants_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            hf_tree_cache: Default::default(),
             api_keys: Arc::new(RwLock::new(Vec::new())),
             store,
         }

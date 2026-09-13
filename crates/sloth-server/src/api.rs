@@ -664,37 +664,55 @@ pub async fn handle_check_embedding(Path(id): Path<String>) -> Json<serde_json::
     }))
 }
 
+/// `GET /api/models/config/:id`: размер, длина контекста и наличие проектора изображений
+/// берутся из настоящего файла. Раньше размер угадывался по названию («3b» → 2,1 ГБ),
+/// а контекст всегда был 131072; для нескачанной модели эти поля теперь `null`.
 pub async fn handle_model_config(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    let scanned = crate::hub::scan_local_gguf_files(&state).await;
-    let size_bytes = scanned
-        .iter()
-        .find(|f| {
-            f.filename.eq_ignore_ascii_case(&id)
-                || f.repo_id.eq_ignore_ascii_case(&id)
-                || id.contains(&f.filename)
-        })
-        .map(|f| f.size_bytes)
-        .unwrap_or_else(|| {
-            if id.to_lowercase().contains("3.2-1b") {
-                807_694_368
-            } else if id.to_lowercase().contains("3b") {
-                2_100_000_000
-            } else {
-                3_800_000_000
-            }
+) -> crate::error::ApiResult<Json<serde_json::Value>> {
+    use crate::error::ApiError;
+
+    let identifier = id.trim();
+    let resolved = crate::hub::resolve_local_gguf_file(&state, identifier).await;
+    let model = crate::hub::local_models(&state)
+        .await?
+        .into_iter()
+        .find(|model| {
+            resolved
+                .as_ref()
+                .is_some_and(|path| model.path == *path || model.shard_paths.contains(path))
+                || (model.complete && model.repo_id().eq_ignore_ascii_case(identifier))
         });
+    let (size_bytes, context_length, is_vision) = match model {
+        Some(model) => {
+            let size_bytes = model.size_bytes;
+            let (context_length, is_vision) = tokio::task::spawn_blocking(move || {
+                let context_length = match sloth_core::gguf::GGUFFile::open(&model.path) {
+                    Ok(file) => file.context_length(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Не удалось прочитать заголовок {}: {err}",
+                            model.path.display()
+                        );
+                        None
+                    }
+                };
+                (context_length, crate::model_inventory::has_projector(&model))
+            })
+            .await
+            .map_err(|err| ApiError::internal(format!("Чтение модели прервано: {err}")))?;
+            (Some(size_bytes), context_length, is_vision)
+        }
+        None => (None, None, false),
+    };
 
-    let is_vision = id.to_lowercase().contains("vision") || id.to_lowercase().contains("-vl");
-
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "id": id,
         "model_name": id,
         "model_type": "text",
         "model_size_bytes": size_bytes,
-        "max_position_embeddings": 131072,
+        "max_position_embeddings": context_length,
         "is_vision": is_vision,
         "is_embedding": false,
         "is_audio": false,
@@ -711,7 +729,7 @@ pub async fn handle_model_config(
                 "lora_dropout": 0.0
             }
         }
-    }))
+    })))
 }
 
 pub async fn handle_start_request_get(
@@ -1019,14 +1037,15 @@ async fn resolve_cached_model_path(
 
     // Сначала точное совпадение среди найденных на диске GGUF (тот же repo и квант),
     // затем — путь или имя файла
-    let from_scan = crate::hub::scan_local_gguf_files(state)
-        .await
+    let from_scan = crate::hub::local_models(state)
+        .await?
         .into_iter()
-        .find(|file| {
-            file.repo_id.eq_ignore_ascii_case(model_id)
-                && variant.is_none_or(|v| file.quant.eq_ignore_ascii_case(v))
+        .find(|model| {
+            model.complete
+                && model.repo_id().eq_ignore_ascii_case(model_id)
+                && variant.is_none_or(|v| model.quant().eq_ignore_ascii_case(v))
         })
-        .map(|file| file.path);
+        .map(|model| model.path);
     let found = match from_scan {
         Some(path) => Some(path),
         None => crate::hub::resolve_local_gguf_file(state, model_id).await,

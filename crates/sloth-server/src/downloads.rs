@@ -12,7 +12,10 @@
 //! - любая ошибка сети или диска переводит задание в состояние `error` с понятным текстом.
 
 use crate::error::{ApiError, ApiResult};
-use crate::model_inventory::{self, LocalModel};
+use crate::hf_api::{
+    authorized, fetch_repo_gguf_files, http_client, resolve_token, RemoteFile, ACCESS_DENIED_HINT,
+};
+use crate::model_inventory::LocalModel;
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -25,26 +28,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::watch;
 
-/// Адрес Hugging Face по умолчанию; переопределяется `HF_ENDPOINT`, как в huggingface_hub.
-pub const DEFAULT_HF_ENDPOINT: &str = "https://huggingface.co";
-pub const HF_ENDPOINT_ENV: &str = "HF_ENDPOINT";
-/// Заголовок, в котором фронтенд передаёт токен Hugging Face.
-pub const HF_TOKEN_HEADER: &str = "x-unsloth-hf-token";
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Сколько можно ждать очередной порции данных. Общего ограничения на длительность
-/// загрузки нет: большая модель на медленном канале качается столько, сколько нужно.
-const READ_TIMEOUT: Duration = Duration::from_secs(120);
-const TREE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_REDIRECTS: usize = 10;
-const USER_AGENT: &str = concat!("sloth-forge/", env!("CARGO_PKG_VERSION"));
 /// Пока не подтверждено, что все файлы на месте, прогресс не показывается как 100 %.
 const MAX_PROGRESS_BEFORE_COMPLETE: f64 = 0.99;
-const PART_SUFFIX: &str = ".part";
+pub(crate) const PART_SUFFIX: &str = ".part";
 const TRANSPORT_HTTP: &str = "http";
 /// Глубина поиска `.part`-файлов внутри папки репозитория.
 const MAX_PARTIAL_SCAN_DEPTH: usize = 3;
@@ -75,13 +64,6 @@ impl JobState {
     fn is_active(self) -> bool {
         matches!(self, JobState::Running | JobState::Cancelling)
     }
-}
-
-/// Файл в репозитории Hugging Face.
-#[derive(Debug, Clone)]
-pub struct RemoteFile {
-    pub path: String,
-    pub size: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -150,6 +132,15 @@ impl DownloadRegistry {
             .map(snapshot_of)
             .collect()
     }
+
+    /// Идёт ли загрузка этого репозитория (и варианта, если он указан).
+    pub(crate) fn is_downloading(&self, repo_id: &str, variant: Option<&str>) -> bool {
+        self.lock().values().any(|job| {
+            job.state.is_active()
+                && job.repo_id.eq_ignore_ascii_case(repo_id.trim())
+                && variant.is_none_or(|variant| job.variant.eq_ignore_ascii_case(variant.trim()))
+        })
+    }
 }
 
 fn snapshot_of(job: &Job) -> JobSnapshot {
@@ -178,7 +169,7 @@ pub fn job_key(repo_id: &str, variant: Option<&str>) -> String {
 // ---------- проверки и пути ----------
 
 /// Идентификатор репозитория вида `org/repo` из безопасных символов.
-fn validate_repo_id(repo_id: &str) -> ApiResult<&str> {
+pub(crate) fn validate_repo_id(repo_id: &str) -> ApiResult<&str> {
     let repo_id = repo_id.trim();
     let parts: Vec<&str> = repo_id.split('/').collect();
     let valid = parts.len() == 2
@@ -199,7 +190,7 @@ fn validate_repo_id(repo_id: &str) -> ApiResult<&str> {
 }
 
 /// Путь файла внутри репозитория без `..`, абсолютных частей и скрытых компонентов.
-fn safe_relative_path(path: &str) -> Option<PathBuf> {
+pub(crate) fn safe_relative_path(path: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for component in Path::new(path).components() {
         match component {
@@ -217,104 +208,14 @@ fn repo_dir(state: &AppState, repo_id: &str) -> Option<PathBuf> {
         .map(|repo| state.models_dir.join(repo))
 }
 
-fn part_path(target: &Path) -> PathBuf {
+/// Путь недокачанной части файла: `<файл>.part`.
+pub(crate) fn part_path(target: &Path) -> PathBuf {
     let mut name = target
         .file_name()
         .map(|name| name.to_os_string())
         .unwrap_or_default();
     name.push(PART_SUFFIX);
     target.with_file_name(name)
-}
-
-async fn resolve_token(state: &AppState, headers: &HeaderMap) -> ApiResult<Option<String>> {
-    let from_header = headers
-        .get(HF_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string);
-    match from_header {
-        Some(token) => Ok(Some(token)),
-        None => crate::settings::runtime::stored_hf_token(state).await,
-    }
-}
-
-// ---------- Hugging Face ----------
-
-fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .read_timeout(READ_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|err| format!("Не удалось создать HTTP-клиент: {err}"))
-}
-
-fn authorized(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
-    match token {
-        Some(token) => request.bearer_auth(token),
-        None => request,
-    }
-}
-
-const ACCESS_DENIED_HINT: &str =
-    "Нет доступа к репозиторию: для закрытых моделей укажите токен Hugging Face в настройках";
-
-#[derive(Debug, Deserialize)]
-struct TreeEntry {
-    #[serde(rename = "type")]
-    kind: String,
-    path: String,
-    size: Option<u64>,
-    lfs: Option<TreeLfs>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TreeLfs {
-    size: Option<u64>,
-}
-
-/// GGUF-файлы репозитория с точными размерами (для LFS-файлов — размер из `lfs.size`).
-pub async fn fetch_repo_gguf_files(
-    client: &reqwest::Client,
-    endpoint: &str,
-    repo_id: &str,
-    token: Option<&str>,
-) -> Result<Vec<RemoteFile>, String> {
-    let url = format!("{endpoint}/api/models/{repo_id}/tree/main?recursive=true");
-    let response = authorized(client.get(&url).timeout(TREE_REQUEST_TIMEOUT), token)
-        .send()
-        .await
-        .map_err(|err| format!("Hugging Face недоступен: {err}"))?;
-    match response.status() {
-        status if status.is_success() => {}
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            return Err(ACCESS_DENIED_HINT.to_string())
-        }
-        StatusCode::NOT_FOUND => {
-            return Err(format!("Репозиторий {repo_id} не найден на Hugging Face"))
-        }
-        status => {
-            return Err(format!(
-                "Hugging Face ответил HTTP {status} на список файлов"
-            ))
-        }
-    }
-    let entries: Vec<TreeEntry> = response
-        .json()
-        .await
-        .map_err(|err| format!("Не удалось разобрать список файлов репозитория: {err}"))?;
-    let mut files: Vec<RemoteFile> = entries
-        .into_iter()
-        .filter(|entry| entry.kind == "file" && entry.path.to_ascii_lowercase().ends_with(".gguf"))
-        .map(|entry| RemoteFile {
-            size: entry.lfs.and_then(|lfs| lfs.size).or(entry.size),
-            path: entry.path,
-        })
-        .collect();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(files)
 }
 
 /// Файлы нужного варианта (без проектора, MTP-голов и прочих вспомогательных файлов).
@@ -404,8 +305,6 @@ async fn run_job(context: JobContext, files: Vec<RemoteFile>, mut cancel: watch:
                 job.downloaded_bytes = job.total_bytes.max(job.completed_bytes);
                 job.completed_bytes = job.downloaded_bytes;
             });
-            // Признак «скачано» у вариантов в кэше больше не соответствует диску
-            context.state.gguf_variants_cache.write().await.clear();
             tracing::info!("Загрузка {} завершена", context.repo_id);
         }
         Err(JobEnd::Cancelled) => {
@@ -614,13 +513,6 @@ async fn finalize_part(
 
 // ---------- диск ----------
 
-async fn scan_models(state: &AppState) -> ApiResult<Vec<LocalModel>> {
-    let roots = state.model_roots().await;
-    tokio::task::spawn_blocking(move || model_inventory::scan_models(&roots))
-        .await
-        .map_err(|err| ApiError::internal(format!("Поиск моделей прерван: {err}")))
-}
-
 /// Полностью скачанная модель этого репозитория (и варианта, если он указан).
 async fn local_variant(
     state: &AppState,
@@ -628,16 +520,26 @@ async fn local_variant(
     variant: Option<&str>,
 ) -> ApiResult<Option<LocalModel>> {
     let variant = variant.map(str::trim).filter(|v| !v.is_empty());
-    Ok(scan_models(state).await?.into_iter().find(|model| {
-        model.complete
-            && model.repo_id().eq_ignore_ascii_case(repo_id.trim())
-            && variant.is_none_or(|v| model.quant().eq_ignore_ascii_case(v))
-    }))
+    Ok(crate::hub::local_models(state)
+        .await?
+        .into_iter()
+        .find(|model| {
+            model.complete
+                && model.repo_id().eq_ignore_ascii_case(repo_id.trim())
+                && variant.is_none_or(|v| model.quant().eq_ignore_ascii_case(v))
+        }))
 }
 
-/// Суммарный размер `.part`-файлов варианта в папке репозитория.
-fn partial_bytes(dir: &Path, variant: Option<&str>) -> u64 {
-    fn walk(dir: &Path, base: &Path, depth: usize, variant: Option<&str>, total: &mut u64) {
+/// Недокачанные `.part`-файлы варианта (или всех вариантов) в папке репозитория:
+/// путь и размер. Синхронная: вызывать через `spawn_blocking`.
+pub(crate) fn part_files(dir: &Path, variant: Option<&str>) -> Vec<(PathBuf, u64)> {
+    fn walk(
+        dir: &Path,
+        base: &Path,
+        depth: usize,
+        variant: Option<&str>,
+        found: &mut Vec<(PathBuf, u64)>,
+    ) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -647,13 +549,14 @@ fn partial_bytes(dir: &Path, variant: Option<&str>) -> u64 {
             };
             let path = entry.path();
             if file_type.is_dir() && depth < MAX_PARTIAL_SCAN_DEPTH {
-                walk(&path, base, depth + 1, variant, total);
+                walk(&path, base, depth + 1, variant, found);
             } else if file_type.is_file() {
+                // Путь внутри репозитория с «/», как в дереве файлов Hugging Face
                 let relative = path
                     .strip_prefix(base)
                     .unwrap_or(&path)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 let Some(model_path) = relative.strip_suffix(PART_SUFFIX) else {
                     continue;
                 };
@@ -661,14 +564,15 @@ fn partial_bytes(dir: &Path, variant: Option<&str>) -> u64 {
                     crate::hub::extract_quant_from_path(model_path).eq_ignore_ascii_case(v)
                 });
                 if matches {
-                    *total += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    found.push((path, size));
                 }
             }
         }
     }
-    let mut total = 0;
-    walk(dir, dir, 0, variant, &mut total);
-    total
+    let mut found = Vec::new();
+    walk(dir, dir, 0, variant, &mut found);
+    found
 }
 
 async fn partial_bytes_for(
@@ -680,9 +584,14 @@ async fn partial_bytes_for(
         return Ok(0);
     };
     let variant = variant.map(str::to_string);
-    tokio::task::spawn_blocking(move || partial_bytes(&dir, variant.as_deref()))
-        .await
-        .map_err(|err| ApiError::internal(format!("Проверка недокачанных файлов прервана: {err}")))
+    tokio::task::spawn_blocking(move || {
+        part_files(&dir, variant.as_deref())
+            .iter()
+            .map(|(_, size)| *size)
+            .sum::<u64>()
+    })
+    .await
+    .map_err(|err| ApiError::internal(format!("Проверка недокачанных файлов прервана: {err}")))
 }
 
 // ---------- обработчики ----------

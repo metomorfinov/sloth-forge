@@ -19,7 +19,11 @@ async fn spawn_test_server() -> (String, Arc<AppState>) {
         PathBuf::from("models")
     };
 
-    let state = Arc::new(AppState::new(vk_ctx, models_dir, Some(static_dir.clone())));
+    let mut state = AppState::new(vk_ctx, models_dir, Some(static_dir.clone()));
+    // Тесты не ходят в интернет: Hugging Face «недоступен» (порт 9 закрыт).
+    // Работа с HF проверяется в downloads_tests.rs и hub_tests.rs на имитации
+    state.hf_endpoint = "http://127.0.0.1:9".to_string();
+    let state = Arc::new(state);
     let app = create_router(Arc::clone(&state), Some(static_dir));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -743,9 +747,9 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
+    // Не-GGUF моделей (safetensors) SlothForge не выполняет: список пуст, GGUF — в cached-gguf
     let cached_models = body["cached"].as_array().unwrap();
-    assert!(!cached_models.is_empty());
-    assert!(body["total_size_bytes"].as_u64().unwrap() > 0);
+    assert!(cached_models.is_empty());
 
     // 2. GET /api/hub/cached-gguf
     let resp = client
@@ -783,7 +787,8 @@ async fn test_hub_inventory_and_variants() {
     let m0 = &models[0];
     assert!(m0["id"].as_str().is_some());
     assert!(m0["display_name"].as_str().is_some());
-    assert!(m0["path"].as_str().unwrap().starts_with("models/"));
+    assert!(m0["path"].as_str().unwrap().ends_with(".gguf"));
+    assert!(m0["model_id"].as_str().is_some());
     assert_eq!(m0["model_format"].as_str(), Some("gguf"));
     assert_eq!(m0["runtime"].as_str(), Some("llama_cpp"));
     assert_eq!(m0["source"].as_str(), Some("models_dir"));
@@ -818,7 +823,7 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["resolved_locally"].as_bool(), Some(true));
+    // Длина контекста прочитана из заголовка GGUF (у Llama-3.2 она действительно 131072)
     assert_eq!(body["context_length"].as_u64(), Some(131072));
     assert_eq!(body["default_variant"].as_str(), Some("Q4_K_M"));
     let local_vars = body["variants"].as_array().unwrap();
@@ -835,7 +840,6 @@ async fn test_hub_inventory_and_variants() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["resolved_locally"].as_bool(), Some(true));
     assert_eq!(body["variants"][0]["downloaded"].as_bool(), Some(true));
 
     // 8. GET /api/hub/gguf-variants for repo unsloth/Llama-3.2-1B-Instruct-GGUF (detects local Q4_K_M)
@@ -851,24 +855,17 @@ async fn test_hub_inventory_and_variants() {
     let q4_1b = vars_1b.iter().find(|v| v["quant"].as_str() == Some("Q4_K_M")).unwrap();
     assert_eq!(q4_1b["downloaded"].as_bool(), Some(true));
 
-    // 9. GET /api/hub/gguf-variants for repo unsloth/Llama-3.2-3B-Instruct-GGUF (not downloaded)
+    // 9. Нескачанный репозиторий при недоступном Hugging Face: честная ошибка 502
+    //    вместо выдуманных файлов model-Q4_K_M.gguf с размером «по названию»
     let repo_3b = "unsloth/Llama-3.2-3B-Instruct-GGUF";
     let resp = client
         .get(format!("{base_url}/api/hub/gguf-variants?repo_id={repo_3b}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_GATEWAY);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["repo_id"].as_str(), Some(repo_3b));
-    assert_eq!(body["has_vision"].as_bool(), Some(false));
-    assert_eq!(body["default_variant"].as_str(), Some("Q4_K_M"));
-    let variants = body["variants"].as_array().unwrap();
-    assert!(variants.len() >= 2);
-    let q4 = variants.iter().find(|v| v["quant"].as_str() == Some("Q4_K_M")).unwrap();
-    assert_eq!(q4["quant"].as_str(), Some("Q4_K_M"));
-    assert_eq!(q4["display_label"].as_str(), Some("Q4_K_M (Recommended)"));
-    assert!(q4["size_bytes"].as_u64().unwrap() > 1_500_000_000);
+    assert!(body["detail"].is_string());
 
     // 10. POST /api/inference/load (поле model_path, как шлёт фронтенд). Файл проверяется
     //     по-настоящему, но загрузить модель можно будет только с движком (этап 2): честный 503
@@ -1373,16 +1370,24 @@ async fn test_hub_token_validate_and_dataset_utils() {
     let (base_url, _) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // 1. POST /api/hub/token/validate
+    // 1. POST /api/hub/token/validate: раньше любой токен был «valid». Без токена — missing,
+    //    с токеном при недоступном Hugging Face — unavailable (проверка ответов HF — в hub_tests.rs)
     let resp = client
         .post(format!("{base_url}/api/hub/token/validate"))
-        .header("authorization", "Bearer hf_testtoken12345")
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let val: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(val["status"].as_str(), Some("valid"));
+    assert_eq!(val["status"].as_str(), Some("missing"));
+    let resp = client
+        .post(format!("{base_url}/api/hub/token/validate"))
+        .header("X-Unsloth-HF-Token", "hf_testtoken12345")
+        .send()
+        .await
+        .unwrap();
+    let val: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(val["status"].as_str(), Some("unavailable"));
 
     // 2. POST /api/hub/datasets/check-format: до этапа 3 честный 501 вместо
     //    выдуманного «alpaca, 1000 строк» для любого файла
@@ -1405,7 +1410,11 @@ async fn test_hub_token_validate_and_dataset_utils() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let impact: serde_json::Value = resp.json().await.unwrap();
-    assert!(impact["reclaimed_bytes"].as_u64().is_some());
+    assert_eq!(
+        impact["reclaimed_bytes"].as_u64(),
+        Some(0),
+        "нескачанная модель ничего не освобождает"
+    );
     assert!(impact["affected_models"].as_array().is_some());
 
     // 4. GET /api/hub/orphan-companions

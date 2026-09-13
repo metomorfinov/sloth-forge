@@ -58,10 +58,7 @@ enum ModelRef {
 }
 
 async fn scan(state: &AppState) -> ApiResult<Vec<LocalModel>> {
-    let roots = state.model_roots().await;
-    tokio::task::spawn_blocking(move || model_inventory::scan_models(&roots))
-        .await
-        .map_err(|err| ApiError::internal(format!("Поиск моделей прерван: {err}")))
+    crate::hub::local_models(state).await
 }
 
 fn repo_id_of(model: &LocalModel) -> String {

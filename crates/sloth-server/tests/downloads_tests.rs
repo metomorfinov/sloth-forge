@@ -1,256 +1,11 @@
-//! Загрузка моделей без интернета: внутри теста поднимается маленькая имитация
-//! Hugging Face (дерево файлов + отдача файлов с поддержкой HTTP Range).
+//! Загрузка моделей без интернета: сервер качает с имитации Hugging Face из `common`.
 
-use axum::body::{Body, Bytes};
-use axum::extract::{Path as AxPath, State as AxState};
-use axum::http::{header, HeaderMap, StatusCode as AxStatus};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Json, Router};
+mod common;
+
+use common::{pattern, Fixture, POLL_ATTEMPTS, POLL_INTERVAL, PRIVATE_REPO, PRIVATE_TOKEN, REPO};
 use reqwest::{Method, StatusCode};
-use serde_json::{json, Value};
-use sloth_server::create_router;
-use sloth_server::state::AppState;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-use tempfile::TempDir;
-
-const CHUNK: usize = 8 * 1024;
-const SLOW_CHUNK_DELAY: Duration = Duration::from_millis(40);
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
-const POLL_ATTEMPTS: usize = 400;
-const REPO: &str = "unsloth/Tiny-GGUF";
-const PRIVATE_REPO: &str = "private/Secret-GGUF";
-const PRIVATE_TOKEN: &str = "hf_secret";
-
-/// Предсказуемое содержимое файла: по нему проверяется, что докачка ничего не испортила.
-fn pattern(len: usize, seed: u8) -> Vec<u8> {
-    (0..len)
-        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
-        .collect()
-}
-
-/// Файлы репозитория: путь → содержимое (None — файл есть в дереве, но не отдаётся).
-type RepoFiles = Vec<(String, Option<Arc<Vec<u8>>>)>;
-
-struct MockHf {
-    /// «org/repo» → файлы
-    repos: HashMap<String, RepoFiles>,
-    slow: bool,
-    range_requests: AtomicUsize,
-}
-
-impl MockHf {
-    fn authorized(&self, repo: &str, headers: &HeaderMap) -> bool {
-        repo != PRIVATE_REPO
-            || headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                == Some(&format!("Bearer {PRIVATE_TOKEN}"))
-    }
-}
-
-async fn mock_tree(
-    AxState(mock): AxState<Arc<MockHf>>,
-    AxPath((org, repo)): AxPath<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let repo_id = format!("{org}/{repo}");
-    if !mock.authorized(&repo_id, &headers) {
-        return AxStatus::UNAUTHORIZED.into_response();
-    }
-    let Some(files) = mock.repos.get(&repo_id) else {
-        return AxStatus::NOT_FOUND.into_response();
-    };
-    let entries: Vec<Value> = files
-        .iter()
-        .map(|(path, data)| {
-            let size = data.as_ref().map_or(12_345, |d| d.len());
-            json!({ "type": "file", "path": path, "size": 134, "lfs": { "size": size } })
-        })
-        .collect();
-    Json(entries).into_response()
-}
-
-async fn mock_resolve(
-    AxState(mock): AxState<Arc<MockHf>>,
-    AxPath((org, repo, path)): AxPath<(String, String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let repo_id = format!("{org}/{repo}");
-    if !mock.authorized(&repo_id, &headers) {
-        return AxStatus::UNAUTHORIZED.into_response();
-    }
-    let data = mock
-        .repos
-        .get(&repo_id)
-        .and_then(|files| files.iter().find(|(p, _)| *p == path))
-        .and_then(|(_, data)| data.clone());
-    let Some(data) = data else {
-        return AxStatus::NOT_FOUND.into_response();
-    };
-
-    let start = match headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-        Some(range) => {
-            mock.range_requests.fetch_add(1, Ordering::Relaxed);
-            let start: usize = range
-                .trim_start_matches("bytes=")
-                .trim_end_matches('-')
-                .parse()
-                .unwrap_or(0);
-            if start >= data.len() {
-                return AxStatus::RANGE_NOT_SATISFIABLE.into_response();
-            }
-            Some(start)
-        }
-        None => None,
-    };
-    let offset = start.unwrap_or(0);
-    let slow = mock.slow;
-    let stream = futures_util::stream::unfold((data, offset), move |(data, pos)| async move {
-        if pos >= data.len() {
-            return None;
-        }
-        if slow {
-            tokio::time::sleep(SLOW_CHUNK_DELAY).await;
-        }
-        let end = (pos + CHUNK).min(data.len());
-        let chunk = Bytes::copy_from_slice(&data[pos..end]);
-        Some((Ok::<_, std::io::Error>(chunk), (data, end)))
-    });
-    let status = if start.is_some() {
-        AxStatus::PARTIAL_CONTENT
-    } else {
-        AxStatus::OK
-    };
-    (status, Body::from_stream(stream)).into_response()
-}
-
-async fn spawn_mock(mock: MockHf) -> (String, Arc<MockHf>) {
-    let mock = Arc::new(mock);
-    let app = Router::new()
-        .route("/api/models/:org/:repo/tree/main", get(mock_tree))
-        .route("/:org/:repo/resolve/main/*path", get(mock_resolve))
-        .with_state(Arc::clone(&mock));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("имитация HF упала");
-    });
-    (format!("http://{addr}"), mock)
-}
-
-fn tiny_repo() -> RepoFiles {
-    vec![
-        (
-            "Q4_K_M/Tiny-Q4_K_M-00001-of-00002.gguf".into(),
-            Some(Arc::new(pattern(40_000, 1))),
-        ),
-        (
-            "Q4_K_M/Tiny-Q4_K_M-00002-of-00002.gguf".into(),
-            Some(Arc::new(pattern(25_000, 2))),
-        ),
-        ("Tiny-Q8_0.gguf".into(), Some(Arc::new(pattern(30_000, 3)))),
-        ("Broken-Q4_0.gguf".into(), None),
-        ("mmproj-F16.gguf".into(), Some(Arc::new(pattern(1_000, 4)))),
-    ]
-}
-
-struct Fixture {
-    _models: TempDir,
-    models_dir: PathBuf,
-    client: reqwest::Client,
-    base_url: String,
-    mock: Arc<MockHf>,
-}
-
-impl Fixture {
-    async fn start(slow: bool) -> Self {
-        let mut repos = HashMap::new();
-        repos.insert(REPO.to_string(), tiny_repo());
-        repos.insert(
-            PRIVATE_REPO.to_string(),
-            vec![(
-                "Secret-Q4_K_M.gguf".into(),
-                Some(Arc::new(pattern(5_000, 9))),
-            )],
-        );
-        let (hf_url, mock) = spawn_mock(MockHf {
-            repos,
-            slow,
-            range_requests: AtomicUsize::new(0),
-        })
-        .await;
-
-        let models = tempfile::tempdir().unwrap();
-        let mut state = AppState::new(None, models.path().to_path_buf(), None);
-        state.hf_endpoint = hf_url;
-        let app = create_router(Arc::new(state), None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("тестовый сервер упал");
-        });
-        Self {
-            models_dir: models.path().to_path_buf(),
-            _models: models,
-            client: reqwest::Client::new(),
-            base_url: format!("http://{addr}"),
-            mock,
-        }
-    }
-
-    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
-        let mut request = self
-            .client
-            .request(method, format!("{}{path}", self.base_url));
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request.send().await.expect("запрос не отправлен");
-        let status = response.status();
-        (status, response.json().await.unwrap_or(Value::Null))
-    }
-
-    async fn start_download(&self, repo: &str, variant: &str) -> (StatusCode, Value) {
-        self.send(
-            Method::POST,
-            "/api/hub/download",
-            Some(json!({ "repo_id": repo, "gguf_variant": variant })),
-        )
-        .await
-    }
-
-    async fn status(&self, repo: &str, variant: &str) -> Value {
-        self.send(
-            Method::GET,
-            &format!("/api/hub/download-status?repo_id={repo}&gguf_variant={variant}"),
-            None,
-        )
-        .await
-        .1
-    }
-
-    async fn wait_for(&self, repo: &str, variant: &str, wanted: &[&str]) -> Value {
-        for _ in 0..POLL_ATTEMPTS {
-            let status = self.status(repo, variant).await;
-            if wanted.contains(&status["state"].as_str().unwrap_or("")) {
-                return status;
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-        panic!("загрузка {repo} {variant} не пришла в состояние {wanted:?}");
-    }
-
-    fn repo_file(&self, repo: &str, path: &str) -> PathBuf {
-        self.models_dir.join(repo).join(path)
-    }
-}
+use serde_json::json;
+use std::sync::atomic::Ordering;
 
 #[tokio::test]
 async fn downloads_all_shards_into_repo_folder() {
@@ -315,9 +70,7 @@ async fn downloads_all_shards_into_repo_folder() {
 async fn resumes_partial_file_with_range() {
     let fx = Fixture::start(false).await;
     let full = pattern(30_000, 3);
-    let part = fx.repo_file(REPO, "Tiny-Q8_0.gguf.part");
-    std::fs::create_dir_all(part.parent().unwrap()).unwrap();
-    std::fs::write(&part, &full[..12_000]).unwrap();
+    let part = fx.put_file(&format!("{REPO}/Tiny-Q8_0.gguf.part"), &full[..12_000]);
 
     fx.start_download(REPO, "Q8_0").await;
     let done = fx.wait_for(REPO, "Q8_0", &["complete", "error"]).await;
@@ -424,15 +177,15 @@ async fn private_repo_requires_token_from_header_or_settings() {
     );
 
     // Токен из заголовка фронтенда
-    let response = fx
-        .client
-        .post(format!("{}/api/hub/download", fx.base_url))
-        .header("X-Unsloth-HF-Token", PRIVATE_TOKEN)
-        .json(&json!({ "repo_id": PRIVATE_REPO, "gguf_variant": "Q4_K_M" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _) = fx
+        .send_with_token(
+            Method::POST,
+            "/api/hub/download",
+            PRIVATE_TOKEN,
+            Some(json!({ "repo_id": PRIVATE_REPO, "gguf_variant": "Q4_K_M" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
     let done = fx
         .wait_for(PRIVATE_REPO, "Q4_K_M", &["complete", "error"])
         .await;
