@@ -273,8 +273,9 @@ pub async fn handle_system_hardware(State(state): State<Arc<AppState>>) -> Json<
             "xpu": null,
             "transformers": null,
             "unsloth": null,
-            // Версия Vulkan API появится вместе с запросом свойств драйвера в Vulkan-слое
-            "vulkan": null,
+            // Версия Vulkan API выбранного устройства, null без видеокарты
+            "vulkan": gpu.vulkan_api_version,
+            "vulkan_driver": gpu.driver_info.as_ref().or(gpu.driver_name.as_ref()),
             "slothforge": env!("CARGO_PKG_VERSION")
         },
         "llama_cpp": null,

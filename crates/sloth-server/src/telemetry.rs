@@ -7,12 +7,12 @@
 //!   мощность, её предел и обороты вентилятора;
 //! - чего узнать нельзя, остаётся `None` (в JSON — `null`), а не придуманное число.
 //!
-//! Занятость видеопамяти на других системах (Windows) появится вместе с запросом
-//! `VK_EXT_memory_budget` в Vulkan-слое.
+//! Где sysfs нет (Windows, видеокарты не AMD), занятость видеопамяти оценивается по бюджету
+//! `VK_EXT_memory_budget`, а драйвер и версия Vulkan берутся у Vulkan-устройства.
 
 use crate::state::AppState;
 use serde_json::{json, Value};
-use sloth_vulkan_sys::VulkanContext;
+use sloth_vulkan_sys::{MemoryBudget, VulkanContext, VulkanError};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,11 @@ pub struct GpuTelemetry {
     pub fan_rpm: Option<u64>,
     /// Драйвер ядра (например, «amdgpu»).
     pub kernel_driver: Option<String>,
+    /// Vulkan-драйвер и его версия (например, «radv» и «Mesa 26.2.2»).
+    pub driver_name: Option<String>,
+    pub driver_info: Option<String>,
+    /// Версия Vulkan API устройства (например, «1.4.328»).
+    pub vulkan_api_version: Option<String>,
 }
 
 impl GpuTelemetry {
@@ -115,10 +120,15 @@ pub fn collect(vk: Option<&VulkanContext>, drm_dir: &Path) -> GpuTelemetry {
     let mut telemetry = GpuTelemetry::default();
     if let Some(ctx) = vk {
         telemetry.name = Some(ctx.device_name().trim().to_string()).filter(|name| !name.is_empty());
-        match ctx.get_vram_info() {
-            Ok(info) if info.total_bytes > 0 => telemetry.vram_total_bytes = Some(info.total_bytes),
-            Ok(_) => {}
-            Err(err) => tracing::warn!("Vulkan не сообщил объём видеопамяти: {err}"),
+        match ctx.device_info() {
+            Ok(info) => {
+                telemetry.vram_total_bytes =
+                    Some(info.device_local_bytes).filter(|total| *total > 0);
+                telemetry.driver_name = info.driver_name;
+                telemetry.driver_info = info.driver_info;
+                telemetry.vulkan_api_version = Some(info.api_version);
+            }
+            Err(err) => tracing::warn!("Vulkan не сообщил сведения об устройстве: {err}"),
         }
     }
     if sysfs_matches_vulkan_name(telemetry.name.as_deref()) {
@@ -127,7 +137,27 @@ pub fn collect(vk: Option<&VulkanContext>, drm_dir: &Path) -> GpuTelemetry {
             read_card(&mut telemetry, card);
         }
     }
+    // Без sysfs (Windows, не AMD) занятость оцениваем по бюджету Vulkan
+    if telemetry.vram_used_bytes.is_none() {
+        if let (Some(ctx), Some(total)) = (vk, telemetry.vram_total_bytes) {
+            match ctx.memory_budget() {
+                Ok(budget) => telemetry.vram_used_bytes = Some(used_from_budget(total, budget)),
+                Err(VulkanError::NotSupported) => {}
+                Err(err) => tracing::debug!("Бюджет видеопамяти недоступен: {err}"),
+            }
+        }
+    }
     telemetry
+}
+
+/// Занято всеми программами ≈ объём − доступное процессу + занятое самим процессом.
+/// Драйвер считает бюджет как свободную память плюс уже занятую процессом, поэтому это
+/// оценка, а не точное число, как в sysfs.
+fn used_from_budget(total: u64, budget: MemoryBudget) -> u64 {
+    total
+        .saturating_sub(budget.budget_bytes)
+        .saturating_add(budget.usage_bytes)
+        .min(total)
 }
 
 /// Данные amdgpu относятся к Vulkan-устройству, только если это видеокарта AMD:
@@ -375,6 +405,25 @@ mod tests {
         )));
         assert!(sysfs_matches_vulkan_name(None));
         assert!(!sysfs_matches_vulkan_name(Some("NVIDIA GeForce RTX 3060")));
+    }
+
+    #[test]
+    fn budget_gives_estimate_of_used_memory() {
+        let total: u64 = 4 << 30;
+        let budget = MemoryBudget {
+            budget_bytes: 1_300 << 20,
+            usage_bytes: 100 << 20,
+        };
+        assert_eq!(
+            used_from_budget(total, budget),
+            total - (1_300 << 20) + (100 << 20)
+        );
+        // Странный ответ драйвера не даёт «занято больше, чем есть»
+        let broken = MemoryBudget {
+            budget_bytes: 0,
+            usage_bytes: 8 << 30,
+        };
+        assert_eq!(used_from_budget(total, broken), total);
     }
 
     #[test]
