@@ -205,7 +205,7 @@ fn compile_shaders(out_dir: &Path) -> Option<PathBuf> {
         }
         let bytes = fs::read(&output_path).expect("SPIR-V прочитан");
         assert!(
-            bytes.len() % 4 == 0,
+            bytes.len().is_multiple_of(4),
             "размер SPIR-V {} не кратен 4",
             output_path.display()
         );
@@ -222,9 +222,10 @@ fn compile_shaders(out_dir: &Path) -> Option<PathBuf> {
 /// Та же таблица, что пишет `make embed`: `spv_<имя>_size` в байтах и слова SPIR-V.
 fn append_word_table(header: &mut String, shader: &str, bytes: &[u8]) {
     const WORDS_PER_LINE: usize = 8;
-    let words: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("ровно 4 байта")))
+    let (chunks, _) = bytes.as_chunks::<4>();
+    let words: Vec<u32> = chunks
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect();
     let _ = writeln!(
         header,
