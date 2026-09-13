@@ -5,6 +5,7 @@ pub mod cluster;
 pub mod downloads;
 pub mod gguf_variants;
 pub mod hf_api;
+pub mod scan_folders;
 pub mod error;
 pub mod handlers;
 pub mod hub;
@@ -73,8 +74,8 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/models/checkpoints", get(api::handle_models_checkpoints))
         .route("/models/export-size", get(api::handle_models_export_size))
         .route("/models/delete-finetuned", delete(api::handle_models_delete_finetuned))
-        .route("/models/scan-folders", get(api::handle_models_scan_folders).post(hub::handle_hub_add_scan_folder))
-        .route("/models/scan-folders/:id", delete(hub::handle_hub_delete_scan_folder))
+        .route("/models/scan-folders", get(scan_folders::list).post(scan_folders::add))
+        .route("/models/scan-folders/:id", delete(scan_folders::remove))
         .route("/models/recommended-folders", get(api::handle_models_recommended_folders))
         .route("/models/loras", get(api::handle_models_loras))
         .route("/models/download-progress", get(downloads::download_progress))
@@ -105,8 +106,8 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/hub/download-progress", get(downloads::download_progress))
         .route("/hub/gguf-download-progress", get(downloads::gguf_download_progress))
         .route("/hub/delete-cached", post(hub::handle_delete_cached).delete(hub::handle_delete_cached))
-        .route("/hub/scan-folders", get(hub::handle_hub_scan_folders).post(hub::handle_hub_add_scan_folder))
-        .route("/hub/scan-folders/:id", delete(hub::handle_hub_delete_scan_folder))
+        .route("/hub/scan-folders", get(scan_folders::list).post(scan_folders::add))
+        .route("/hub/scan-folders/:id", delete(scan_folders::remove))
         .route("/hub/delete-impact", get(hub::handle_hub_delete_impact).post(hub::handle_hub_delete_impact_post))
         .route("/hub/orphan-companions", get(hub::handle_hub_orphan_companions))
         .route("/hub/token/validate", post(hf_api::validate_token))

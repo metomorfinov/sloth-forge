@@ -9,7 +9,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::model_inventory::{self, LocalModel};
 use crate::state::AppState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     Json,
 };
 use serde::Deserialize;
@@ -505,50 +505,7 @@ pub async fn handle_delete_cached(
     })))
 }
 
-pub async fn handle_hub_scan_folders(
-    State(state): State<Arc<AppState>>,
-) -> Json<Value> {
-    let folders = state.scan_folders.read().await;
-    Json(json!({
-        "folders": *folders
-    }))
-}
-
-pub async fn handle_hub_add_scan_folder(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    let path = payload
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut folders = state.scan_folders.write().await;
-    let next_id = (folders.len() as u64) + 1;
-    let entry = crate::state::ScanFolderEntry {
-        id: next_id,
-        path,
-        created_at: crate::state::iso_now(),
-        status: Some("ok".to_string()),
-    };
-    folders.push(entry.clone());
-    Json(serde_json::to_value(entry).unwrap_or(json!({
-        "id": next_id,
-        "status": "ok"
-    })))
-}
-
-pub async fn handle_hub_delete_scan_folder(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
-) -> Json<Value> {
-    let mut folders = state.scan_folders.write().await;
-    folders.retain(|f| f.id != id);
-    Json(json!({
-        "status": "ok",
-        "deleted": true
-    }))
-}
+// Дополнительные папки с моделями (scan-folders) — в scan_folders.rs
 
 #[derive(Debug, Default, Deserialize)]
 pub struct DeleteImpactRequest {

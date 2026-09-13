@@ -1327,9 +1327,16 @@ async fn test_hub_scan_folders_crud() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["folders"].as_array().map(|a| a.len()), Some(0));
 
-    // 2. Add scan folder
+    // 2. Add scan folder: только существующая папка (раньше принимался любой путь)
+    let custom_models = tempfile::tempdir().unwrap();
+    let custom_path = custom_models
+        .path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let add_payload = serde_json::json!({
-        "path": "/home/rivergod/custom-models"
+        "path": custom_path
     });
     let resp = client
         .post(format!("{base_url}/api/hub/scan-folders"))
@@ -1340,7 +1347,8 @@ async fn test_hub_scan_folders_crud() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let folder: serde_json::Value = resp.json().await.unwrap();
     let folder_id = folder["id"].as_u64().unwrap();
-    assert_eq!(folder["path"].as_str(), Some("/home/rivergod/custom-models"));
+    assert_eq!(folder["path"].as_str(), Some(custom_path.as_str()));
+    assert_eq!(folder["status"].as_str(), Some("ok"));
 
     // 3. List shows added folder
     let resp = client.get(format!("{base_url}/api/hub/scan-folders")).send().await.unwrap();

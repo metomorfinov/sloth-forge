@@ -286,7 +286,7 @@ impl AppState {
             training_mutex: Arc::new(Mutex::new(())),
             downloads: crate::downloads::DownloadRegistry::default(),
             hf_endpoint: crate::hf_api::endpoint_from_env(),
-            scan_folders: Arc::new(RwLock::new(Vec::new())),
+            scan_folders: Arc::new(RwLock::new(crate::scan_folders::load(&store))),
             hf_tree_cache: Default::default(),
             api_keys: Arc::new(RwLock::new(Vec::new())),
             store,

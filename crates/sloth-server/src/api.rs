@@ -820,13 +820,6 @@ pub async fn handle_inference_images_status() -> Json<serde_json::Value> {
 }
 
 // Models
-pub async fn handle_models_scan_folders(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let folders = state.scan_folders.read().await;
-    Json(serde_json::json!({ "folders": *folders }))
-}
-
 pub async fn handle_models_recommended_folders() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "folders": ["models"] }))
 }
