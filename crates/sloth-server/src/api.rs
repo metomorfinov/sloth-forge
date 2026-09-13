@@ -743,28 +743,6 @@ pub async fn handle_start_request_cancel(
     }))
 }
 
-pub async fn handle_hf_token_get() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "has_token": false,
-        "token": null
-    }))
-}
-
-pub async fn handle_hf_token_put(Json(payload): Json<serde_json::Value>) -> Json<serde_json::Value> {
-    let token = payload.get("token").and_then(|v| v.as_str()).unwrap_or("");
-    Json(serde_json::json!({
-        "has_token": !token.is_empty(),
-        "token": if token.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(token.to_string()) }
-    }))
-}
-
-pub async fn handle_hf_token_delete() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "has_token": false,
-        "token": null
-    }))
-}
-
 pub async fn handle_providers_registry() -> Json<serde_json::Value> {
     Json(serde_json::json!([]))
 }
@@ -785,10 +763,6 @@ pub async fn handle_auth_logout() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok"
     }))
-}
-
-pub async fn handle_generation_presets() -> Json<serde_json::Value> {
-    Json(serde_json::json!({}))
 }
 
 // Inference Status & Monitor
@@ -1119,211 +1093,8 @@ pub async fn handle_models_loras() -> Json<serde_json::Value> {
 
 // Треды, сообщения, проекты и настройки чата — в chat_history.rs (хранятся в SQLite)
 
-// Settings
-pub async fn handle_settings_personalization(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let p = state.personalization.read().await;
-    Json((*p).clone())
-}
-
-pub async fn handle_settings_personalization_put(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mut p = state.personalization.write().await;
-    *p = payload;
-    Json((*p).clone())
-}
-
-pub async fn handle_settings_upload_limit(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
-    let mb = limit / (1024 * 1024);
-    Json(serde_json::json!({
-        "max_upload_size_mb": mb,
-        "max_upload_size_bytes": limit,
-        "max_upload_size_label": format!("{}MB", mb),
-        "default_upload_size_mb": 500,
-        "min_upload_size_mb": 50,
-        "max_allowed_upload_size_mb": 2048,
-        "limit_bytes": limit
-    }))
-}
-
-/// Верхняя граница лимита загрузки файлов (совпадает с `max_allowed_upload_size_mb` в GET).
-const MAX_UPLOAD_SIZE_MB: u64 = 2048;
-const BYTES_PER_MB: u64 = 1024 * 1024;
-
-pub async fn handle_settings_upload_limit_put(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    // Значение ограничивается сверху: умножение огромного числа из запроса переполнялось
-    if let Some(mb) = payload.get("max_upload_size_mb").and_then(|v| v.as_u64()) {
-        state.upload_limit_bytes.store(mb.min(MAX_UPLOAD_SIZE_MB) * BYTES_PER_MB, Ordering::Relaxed);
-    } else if let Some(lim) = payload.get("limit_bytes").and_then(|v| v.as_u64()) {
-        state.upload_limit_bytes.store(lim.min(MAX_UPLOAD_SIZE_MB * BYTES_PER_MB), Ordering::Relaxed);
-    }
-    let limit = state.upload_limit_bytes.load(Ordering::Relaxed);
-    let mb = limit / (1024 * 1024);
-    Json(serde_json::json!({
-        "max_upload_size_mb": mb,
-        "max_upload_size_bytes": limit,
-        "max_upload_size_label": format!("{}MB", mb),
-        "default_upload_size_mb": 500,
-        "min_upload_size_mb": 50,
-        "max_allowed_upload_size_mb": 2048,
-        "limit_bytes": limit
-    }))
-}
-
-pub async fn handle_settings_vram_budget(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let budget = state.vram_budget_mb.load(Ordering::Relaxed);
-    let fraction = (budget as f64 / 4096.0).clamp(0.1, 1.0);
-    Json(serde_json::json!({
-        "fraction": (fraction * 100.0).round() / 100.0,
-        "is_stored": true,
-        "default_fraction": 0.9,
-        "min_fraction": 0.1,
-        "max_fraction": 1.0,
-        "reload_required": false,
-        "vram_budget_mb": budget
-    }))
-}
-
-pub async fn handle_settings_vram_budget_put(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    if let Some(f) = payload.get("fraction").and_then(|v| v.as_f64()) {
-        let mb = (f * 4096.0).round() as u64;
-        state.vram_budget_mb.store(mb, Ordering::Relaxed);
-    } else if let Some(b) = payload.get("vram_budget_mb").and_then(|v| v.as_u64()) {
-        state.vram_budget_mb.store(b, Ordering::Relaxed);
-    }
-    let budget = state.vram_budget_mb.load(Ordering::Relaxed);
-    let fraction = (budget as f64 / 4096.0).clamp(0.1, 1.0);
-    Json(serde_json::json!({
-        "fraction": (fraction * 100.0).round() / 100.0,
-        "is_stored": true,
-        "default_fraction": 0.9,
-        "min_fraction": 0.1,
-        "max_fraction": 1.0,
-        "reload_required": false,
-        "vram_budget_mb": budget
-    }))
-}
-
-pub async fn handle_settings_download_transport() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "mode": "http",
-        "transport": "direct",
-        "xet_available": false,
-        "xet_unavailable_reason": "Xet disabled in SlothForge; direct HTTP streaming active",
-        "auto_resolves_to": "http",
-        "auto_reason": "Native Vulkan engine using direct HTTP streaming"
-    }))
-}
-
-pub async fn handle_settings_download_transport_put(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mode = payload.get("mode").and_then(|v| v.as_str()).unwrap_or("http");
-    Json(serde_json::json!({
-        "mode": mode,
-        "transport": mode,
-        "xet_available": false,
-        "xet_unavailable_reason": "Xet disabled in SlothForge; direct HTTP streaming active",
-        "auto_resolves_to": "http",
-        "auto_reason": "Native Vulkan engine using direct HTTP streaming"
-    }))
-}
-
-pub async fn handle_settings_embedding_model() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "embedding_model": "BAAI/bge-small-en-v1.5",
-        "embedding_gguf_repo": "BAAI/bge-small-en-v1.5-GGUF",
-        "default_embedding_model": "BAAI/bge-small-en-v1.5",
-        "default_embedding_gguf_repo": "BAAI/bge-small-en-v1.5-GGUF",
-        "is_custom": false,
-        "loaded": false,
-        "backend_loaded": false
-    }))
-}
-
-pub async fn handle_settings_embedding_model_resolve() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "embedding_model": "BAAI/bge-small-en-v1.5",
-        "backend": "sentence-transformers",
-        "download_repo": null,
-        "files": null,
-        "cached": false,
-        "size_bytes": 133000000,
-        "error": null
-    }))
-}
-
-pub async fn handle_settings_openai_auto_switch() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": false
-    }))
-}
-
-pub async fn handle_settings_openai_auto_switch_overrides(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let ov = state.model_overrides.read().await;
-    Json(serde_json::json!({
-        "overrides": *ov
-    }))
-}
-
-pub async fn handle_settings_openai_auto_switch_overrides_put(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let mut ov = state.model_overrides.write().await;
-    let new_ov = payload.get("overrides").cloned().unwrap_or(payload);
-    *ov = new_ov;
-    Json(serde_json::json!({
-        "status": "ok",
-        "overrides": *ov
-    }))
-}
-
-pub async fn handle_settings_chat_preferences() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok"
-    }))
-}
-
-pub async fn handle_settings_model_memory() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "fraction": 0.9
-    }))
-}
-
-pub async fn handle_settings_last_local_model() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "last_model": "llama-3.2-3b-instruct-q4_k_m"
-    }))
-}
-
-pub async fn handle_settings_llama_cpp_path() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "path": null,
-        "source": "default",
-        "editable": false,
-        "available": true,
-        "resolved_binary": "native/sloth-vulkan",
-        "environment_variable": null,
-        "reload_required": false
-    }))
-}
+// Settings: персонализация, лимиты, память моделей, пресеты и прочие сохраняемые
+// настройки — в модуле settings (хранятся в SQLite)
 
 pub async fn handle_llama_backend() -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -1392,55 +1163,6 @@ pub async fn handle_settings_lan_access_post(state: State<Arc<AppState>>) -> Jso
     handle_settings_lan_access(state).await
 }
 
-pub async fn handle_settings_helper_precache() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": false,
-        "default_enabled": false,
-        "disabled_by_env": false
-    }))
-}
-
-pub async fn handle_settings_helper_precache_put(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    Json(serde_json::json!({
-        "enabled": enabled,
-        "default_enabled": false,
-        "disabled_by_env": false
-    }))
-}
-
-pub async fn handle_settings_hugging_face_cache() -> Json<serde_json::Value> {
-    // Как в huggingface_hub: HF_HOME, иначе ~/.cache/huggingface
-    let cache_path = std::env::var_os("HF_HOME")
-        .map(PathBuf::from)
-        .or_else(|| crate::paths::home_dir().map(|home| home.join(".cache").join("huggingface")))
-        .unwrap_or_else(|| PathBuf::from(".cache").join("huggingface"));
-    let hub_dir = cache_path.join("hub").to_string_lossy().to_string();
-    let xet_dir = cache_path.join("xet").to_string_lossy().to_string();
-    let cache_dir = cache_path.to_string_lossy().to_string();
-
-    Json(serde_json::json!({
-        "cache_home": cache_dir,
-        "hub_cache": hub_dir,
-        "xet_cache": xet_dir,
-        "source": "default",
-        "editable": false,
-        "is_custom": false,
-        "available": true,
-        "writable": true,
-        "free_bytes": 107374182400u64,
-        "environment_variable": null
-    }))
-}
-
-pub async fn handle_settings_keyless_api_access() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": true
-    }))
-}
-
 pub async fn handle_settings_remote_access() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "state": "off",
@@ -1468,23 +1190,6 @@ pub async fn handle_settings_remote_access_post() -> Json<serde_json::Value> {
     handle_settings_remote_access().await
 }
 
-pub async fn handle_settings_preview_sharing() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": false,
-        "default_enabled": false
-    }))
-}
-
-pub async fn handle_settings_preview_sharing_put(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-    Json(serde_json::json!({
-        "enabled": enabled,
-        "default_enabled": false
-    }))
-}
-
 pub async fn handle_settings_preview_links_rotate() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -1493,12 +1198,6 @@ pub async fn handle_settings_coding_agents() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "agents": ["claude", "cursor", "cline", "continue", "aider"],
         "detected": []
-    }))
-}
-
-pub async fn handle_settings_current_date_prompt() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "enabled": true
     }))
 }
 
@@ -1561,13 +1260,6 @@ pub async fn handle_xet_notice_reserve(
 
 pub async fn handle_igpu_carveout_notice_dismiss() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
-}
-
-pub async fn handle_settings_current_date_prompt_put(
-    Json(payload): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let enabled = payload.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    Json(serde_json::json!({ "enabled": enabled }))
 }
 
 /// Находит модель на диске по `repo_id` (и необязательному `variant`) из запроса.

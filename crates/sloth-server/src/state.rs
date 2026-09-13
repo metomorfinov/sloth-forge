@@ -288,12 +288,8 @@ pub struct AppState {
     pub download_state: Arc<RwLock<DownloadState>>,
     pub download_cancel: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
     pub active_inference_model: Arc<RwLock<String>>,
-    pub vram_budget_mb: Arc<AtomicU64>,
-    pub upload_limit_bytes: Arc<AtomicU64>,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
     pub gguf_variants_cache: Arc<RwLock<std::collections::HashMap<String, (Instant, serde_json::Value)>>>,
-    pub personalization: Arc<RwLock<serde_json::Value>>,
-    pub model_overrides: Arc<RwLock<serde_json::Value>>,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
     /// Постоянное хранилище: история чатов, проекты, настройки, запуски обучения.
     pub store: Arc<crate::store::Store>,
@@ -324,29 +320,6 @@ impl AppState {
         let (tx_telemetry, _) = broadcast::channel(256);
         let master_gradients = Arc::new(RwLock::new(vec![0.0f32; 1024 * 64]));
 
-        let default_personalization = serde_json::json!({
-            "version": 1,
-            "profile": {
-                "displayName": "rivergod",
-                "nickname": "rivergod",
-                "avatarDataUrl": null,
-                "avatarShape": "circle",
-                "showGreetingSloth": true
-            },
-            "appearance": {
-                "theme": "dark",
-                "palette": "standard",
-                "language": "en",
-                "customization": {}
-            },
-            "user_name": "rivergod",
-            "custom_instructions": "",
-            "saved": true,
-            "customizationSaved": true,
-            "paletteSaved": true,
-            "greetingSlothSaved": true
-        });
-
         Self {
             vk_ctx,
             coordinator,
@@ -361,12 +334,8 @@ impl AppState {
             download_state: Arc::new(RwLock::new(DownloadState::default())),
             download_cancel: Arc::new(RwLock::new(None)),
             active_inference_model: Arc::new(RwLock::new("llama-3.2-3b-instruct-q4_k_m".to_string())),
-            vram_budget_mb: Arc::new(AtomicU64::new(4096)),
-            upload_limit_bytes: Arc::new(AtomicU64::new(10737418240)),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
             gguf_variants_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            personalization: Arc::new(RwLock::new(default_personalization)),
-            model_overrides: Arc::new(RwLock::new(serde_json::json!({}))),
             api_keys: Arc::new(RwLock::new(Vec::new())),
             store,
             model_load_progress: Arc::new(RwLock::new(LoadProgressState::default())),

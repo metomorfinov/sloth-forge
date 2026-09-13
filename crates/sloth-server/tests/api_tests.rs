@@ -1051,27 +1051,33 @@ async fn test_settings_and_studio_export_endpoints() {
     // Personalization
     let resp = client.get(format!("{base_url}/api/settings/personalization")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Формат фронтенда (Personalization): profile и appearance; до сохранения saved = false.
+    // Имя по умолчанию берётся из учётной записи системы, а не зашито в код.
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["user_name"].as_str(), Some("rivergod"));
-    assert_eq!(body["custom_instructions"].as_str(), Some(""));
+    assert!(body["profile"].is_object());
+    assert!(body["appearance"].is_object());
+    assert_eq!(body["saved"].as_bool(), Some(false));
 
-    // Upload limit
+    // Upload limit: по умолчанию 500 МБ в пределах 50..2048 (раньше 10 ГиБ при максимуме 2048)
     let resp = client.get(format!("{base_url}/api/settings/upload-limit")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["limit_bytes"].as_u64(), Some(10737418240));
+    assert_eq!(body["max_upload_size_mb"].as_u64(), Some(500));
+    assert_eq!(body["max_upload_size_bytes"].as_u64(), Some(500 * 1024 * 1024));
 
-    // VRAM budget
+    // VRAM budget: доля по умолчанию, пока пользователь её не сохранил
     let resp = client.get(format!("{base_url}/api/settings/vram-budget")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["vram_budget_mb"].as_u64(), Some(4096));
+    assert_eq!(body["fraction"].as_f64(), Some(0.9));
+    assert_eq!(body["is_stored"].as_bool(), Some(false));
 
-    // Download transport
+    // Download transport: формат фронтенда (mode), Xet честно недоступен
     let resp = client.get(format!("{base_url}/api/settings/download-transport")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["transport"].as_str(), Some("direct"));
+    assert_eq!(body["mode"].as_str(), Some("auto"));
+    assert_eq!(body["xet_available"].as_bool(), Some(false));
 
     // Embedding model
     let resp = client.get(format!("{base_url}/api/settings/embedding-model")).send().await.unwrap();
@@ -1086,10 +1092,11 @@ async fn test_settings_and_studio_export_endpoints() {
     assert_eq!(body["enabled"].as_bool(), Some(false));
 
     // Chat preferences migrate
+    // Chat preferences migrate: формат фронтенда show_model_disclaimer (раньше {"status":"ok"})
     let resp = client.post(format!("{base_url}/api/settings/chat-preferences/migrate")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["status"].as_str(), Some("ok"));
+    assert_eq!(body["show_model_disclaimer"].as_bool(), Some(true));
 
     // Studio capabilities
     let resp = client.get(format!("{base_url}/api/studio/download-transport-capabilities")).send().await.unwrap();
@@ -1119,8 +1126,9 @@ async fn test_settings_and_studio_export_endpoints() {
     assert!(body["path"].is_null());
     assert_eq!(body["source"].as_str(), Some("default"));
     assert_eq!(body["editable"].as_bool(), Some(false));
-    assert_eq!(body["available"].as_bool(), Some(true));
-    assert_eq!(body["resolved_binary"].as_str(), Some("native/sloth-vulkan"));
+    // llama.cpp в SlothForge не используется: честно «недоступен», без выдуманного бинарника
+    assert_eq!(body["available"].as_bool(), Some(false));
+    assert!(body["resolved_binary"].is_null());
     assert!(body["environment_variable"].is_null());
     assert_eq!(body["reload_required"].as_bool(), Some(false));
 
@@ -1506,7 +1514,7 @@ async fn test_audited_endpoints_and_schemas() {
     let resp = client.get(format!("{base_url}/api/settings/upload-limit")).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let ul: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(ul["max_upload_size_mb"].as_u64(), Some(10240));
+    assert_eq!(ul["max_upload_size_mb"].as_u64(), Some(500));
     assert!(ul["max_upload_size_bytes"].is_number());
 
     // 4. VRAM budget fraction
