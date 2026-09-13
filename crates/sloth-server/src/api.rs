@@ -844,7 +844,9 @@ pub async fn handle_inference_load(
     if let Some(ref path) = file_path {
         // Real GGUF parse with sloth_core
         if let Ok(gguf) = sloth_core::gguf::GGUFFile::open(path) {
-            context_len = gguf.context_length();
+            if let Some(context_length) = gguf.context_length() {
+                context_len = context_length;
+            }
             println!("[SlothInference] Opened GGUF '{:?}': arch={:?}, ctx={}, tensors={}", path, gguf.architecture(), context_len, gguf.tensor_count);
         }
     }

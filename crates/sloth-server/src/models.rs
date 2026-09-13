@@ -156,7 +156,8 @@ pub fn discover_models(models_dir: &Path) -> Vec<ModelCard> {
                         // Try to parse GGUF headers
                         if let Ok(gguf) = GGUFFile::open(&path) {
                             let arch = gguf.architecture().unwrap_or("llama").to_string();
-                            let ctx_len = gguf.context_length();
+                            // 0 — длина контекста не указана в файле (список моделей переписывает шаг 6)
+                            let ctx_len = gguf.context_length().unwrap_or(0);
                             let id = filename.trim_end_matches(".gguf").to_lowercase();
                             let name = filename.trim_end_matches(".gguf").to_string();
 

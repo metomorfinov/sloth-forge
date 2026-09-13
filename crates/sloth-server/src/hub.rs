@@ -764,7 +764,8 @@ pub async fn handle_gguf_variants(
             let quant = extract_quant_from_path(&filename);
 
             let context_length = if let Ok(gguf) = sloth_core::gguf::GGUFFile::open(&resolved_path) {
-                gguf.context_length()
+                // Значение по умолчанию уберёт шаг 8 (варианты по реальным файлам)
+                gguf.context_length().unwrap_or(131072)
             } else {
                 131072
             };
