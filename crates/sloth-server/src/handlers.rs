@@ -1,4 +1,3 @@
-use crate::models::{discover_models, OpenAIModelInfo};
 use crate::state::{AppState, WsTelemetryEnvelope};
 use crate::training::{self, TrainStartRequest, TrainStatusResponse};
 use axum::{
@@ -15,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sloth_vulkan_sys::VramInfo;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,16 +31,6 @@ pub struct HardwareDetails {
     pub driver: String,
     pub is_cluster: bool,
     pub cluster_total_vram_mb: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelsApiResponse {
-    pub object: String,
-    pub count: usize,
-    pub models: Vec<crate::models::ModelCard>,
-    pub default_models: Vec<String>,
-    pub data: Vec<OpenAIModelInfo>,
 }
 
 pub async fn handle_vram(State(state): State<Arc<AppState>>) -> Json<VramInfo> {
@@ -112,36 +101,6 @@ pub async fn handle_hardware(State(state): State<Arc<AppState>>) -> Json<Hardwar
         driver: "RADV POLARIS10 (Mesa 24.0.0)".to_string(),
         is_cluster,
         cluster_total_vram_mb: cluster_vram,
-    })
-}
-
-pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<ModelsApiResponse> {
-    let cards = discover_models(&state.models_dir);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let openai_data = cards
-        .iter()
-        .map(|c| OpenAIModelInfo {
-            id: c.id.clone(),
-            object: "model".to_string(),
-            created: now,
-            owned_by: "slothforge".to_string(),
-        })
-        .collect();
-
-    let count = cards.len();
-    Json(ModelsApiResponse {
-        object: "list".to_string(),
-        count,
-        models: cards,
-        default_models: vec![
-            "llama-3.2-3b-instruct-q4_k_m".to_string(),
-            "llama-3.2-1b-instruct-q4_k_m".to_string(),
-        ],
-        data: openai_data,
     })
 }
 

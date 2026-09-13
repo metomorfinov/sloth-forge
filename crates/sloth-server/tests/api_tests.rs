@@ -97,11 +97,13 @@ async fn test_get_models() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp.json().await.unwrap();
 
+    // Список строится по реальным файлам в models/ (раньше подмешивались 4 модели, которых нет на диске)
     let models = body["models"].as_array().expect("Expected models array");
     assert!(!models.is_empty());
+    assert_eq!(body["default_models"].as_array().map(Vec::len), Some(0));
 
     let has_llama = models.iter().any(|m| {
-        m["filename"].as_str().map(|f| f.contains("Llama")).unwrap_or(false)
+        m["name"].as_str().map(|f| f.contains("Llama")).unwrap_or(false)
     });
     assert!(has_llama);
 }
@@ -467,15 +469,17 @@ async fn test_unsloth_models_and_model_picker_schema() {
     assert!(m0["name"].as_str().is_some());
     assert_eq!(m0["isGguf"].as_bool().or_else(|| m0["is_gguf"].as_bool()), Some(true));
     assert_eq!(m0["isVision"].as_bool().or_else(|| m0["is_vision"].as_bool()), Some(false));
-    assert_eq!(m0["source"].as_str(), Some("models_dir"));
 
     // 2. Check /api/models/list alias
     let resp_list = client.get(format!("{base_url}/api/models/list")).send().await.unwrap();
     assert_eq!(resp_list.status(), reqwest::StatusCode::OK);
 
-    // 3. Check /api/models/local alias
+    // 3. /api/models/local: свой формат фронтенда (LocalModelListResponse), source — у каждой модели
     let resp_local = client.get(format!("{base_url}/api/models/local")).send().await.unwrap();
     assert_eq!(resp_local.status(), reqwest::StatusCode::OK);
+    let local: serde_json::Value = resp_local.json().await.unwrap();
+    assert!(local["models_dir"].is_string());
+    assert_eq!(local["models"][0]["source"].as_str(), Some("models_dir"));
 }
 
 #[tokio::test]
@@ -703,15 +707,15 @@ async fn test_inference_status_and_monitor() {
         .await
         .expect("Failed to call /api/inference/status");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // Движок инференса подключится на этапе 2: ничего не загружено
+    // (раньше при старте «активной» объявлялась модель llama-3.2-3b, которой нет на диске)
     let status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(status["active_model"].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
-    assert_eq!(status["model_identifier"].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
+    assert!(status["active_model"].is_null());
+    assert!(status["model_identifier"].is_null());
     assert_eq!(status["is_vision"].as_bool(), Some(false));
-    assert_eq!(status["is_gguf"].as_bool(), Some(true));
-    assert_eq!(status["is_local_model"].as_bool(), Some(true));
     assert_eq!(status["loading"].as_array().map(|a| a.len()), Some(0));
-    assert_eq!(status["loaded"][0].as_str(), Some("llama-3.2-3b-instruct-q4_k_m"));
-    assert_eq!(status["context_length"].as_u64(), Some(131072));
+    assert_eq!(status["loaded"].as_array().map(|a| a.len()), Some(0));
+    assert!(status["context_length"].is_null());
     assert_eq!(status["supports_tools"].as_bool(), Some(false));
 
     // 2. GET /api/inference/monitor
@@ -866,37 +870,40 @@ async fn test_hub_inventory_and_variants() {
     assert_eq!(q4["display_label"].as_str(), Some("Q4_K_M (Recommended)"));
     assert!(q4["size_bytes"].as_u64().unwrap() > 1_500_000_000);
 
-    // 10. POST /api/inference/load with filename, model id, and repo id
+    // 10. POST /api/inference/load (поле model_path, как шлёт фронтенд). Файл проверяется
+    //     по-настоящему, но загрузить модель можно будет только с движком (этап 2): честный 503
+    //     вместо прежнего «status: ok» после шести пауз по 200 мс.
     let resp = client
         .post(format!("{base_url}/api/inference/load"))
-        .json(&serde_json::json!({ "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf" }))
+        .json(&serde_json::json!({ "model_path": "Llama-3.2-1B-Instruct-Q4_K_M.gguf" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     let load_res: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(load_res["status"].as_str(), Some("ok"));
-    assert_eq!(load_res["model"].as_str(), Some("Llama-3.2-1B-Instruct-Q4_K_M.gguf"));
+    let detail = load_res["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("слоёв: 16"), "метаданные прочитаны из файла: {detail}");
 
+    // Репозиторий Hugging Face + вариант кванта находит тот же локальный файл
     let resp = client
         .post(format!("{base_url}/api/inference/load"))
-        .json(&serde_json::json!({ "model": "llama-3.2-1b-instruct-q4_k_m" }))
+        .json(&serde_json::json!({
+            "model_path": "unsloth/Llama-3.2-1B-Instruct-GGUF",
+            "gguf_variant": "Q4_K_M"
+        }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let load_res: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(load_res["status"].as_str(), Some("ok"));
+    assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
+    // Выдуманный идентификатор — честный 404
     let resp = client
         .post(format!("{base_url}/api/inference/load"))
-        .json(&serde_json::json!({ "repo_id": "unsloth/Llama-3.2-1B-Instruct-GGUF" }))
+        .json(&serde_json::json!({ "model_path": "llama-3.2-1b-instruct-q4_k_m" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let load_res: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(load_res["status"].as_str(), Some("ok"));
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1643,16 +1650,13 @@ async fn test_model_picker_and_deep_integration_audit() {
     assert!(est["weights_bytes"].as_u64().unwrap() > 0);
     assert!(est["kv_bytes"].as_u64().unwrap() > 0);
     assert!(est["total_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(est["fits"].as_bool(), Some(true));
+    // Поле fits в контракте фронтенда отсутствует; число слоёв — из заголовка GGUF, а не «32»
+    assert_eq!(est["layer_count"].as_u64(), Some(16));
+    assert_eq!(est["kv_estimable"].as_bool(), Some(true));
 
-    // 3. Llama Flags Catalog: GET /api/inference/llama-flags
+    // 3. Llama Flags Catalog: флаги llama-server к SlothForge не относятся — честный 501
     let resp = client.get(format!("{base_url}/api/inference/llama-flags")).send().await.unwrap();
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-    let flags: serde_json::Value = resp.json().await.unwrap();
-    assert!(flags["flags"].is_object(), "flags MUST be a dictionary/object of flag descriptions");
-    assert!(flags["managed"].is_array());
-    assert!(flags["switch_flags"].is_array());
-    assert_eq!(flags["probe_ok"].as_bool(), Some(true));
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
 
     // 4. Overrides: PUT & GET /api/settings/openai-auto-switch/overrides
     let test_overrides = serde_json::json!({
@@ -1722,7 +1726,7 @@ async fn test_model_picker_and_deep_integration_audit() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let resp = client.get(format!("{base_url}/api/inference/status")).send().await.unwrap();
     let inf_status: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(inf_status["active_model"].as_str(), Some(""));
+    assert!(inf_status["active_model"].is_null(), "загруженной модели нет");
 
     // 10. Personalization Persistence: PUT & GET /api/settings/personalization
     let updated_profile = serde_json::json!({

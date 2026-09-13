@@ -188,6 +188,14 @@ impl GGMLType {
         self.table_row().map(|row| row.2).unwrap_or("unknown")
     }
 
+    /// Тип по имени без учёта регистра (`q8_0`, `F16`); `None`, если имя неизвестно.
+    pub fn from_name(name: &str) -> Option<Self> {
+        TYPE_TABLE
+            .iter()
+            .find(|(_, _, table_name, ..)| table_name.eq_ignore_ascii_case(name.trim()))
+            .map(|(_, ty, ..)| *ty)
+    }
+
     /// Устройство блока или `None` для неизвестного типа.
     pub fn block_layout(self) -> Option<BlockLayout> {
         self.table_row().map(|row| BlockLayout {

@@ -253,25 +253,6 @@ pub struct ScanFolderEntry {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadProgressState {
-    pub phase: Option<String>,
-    pub bytes_loaded: u64,
-    pub bytes_total: u64,
-    pub fraction: f64,
-}
-
-impl Default for LoadProgressState {
-    fn default() -> Self {
-        Self {
-            phase: None,
-            bytes_loaded: 0,
-            bytes_total: 0,
-            fraction: 0.0,
-        }
-    }
-}
-
 pub struct AppState {
     pub vk_ctx: Option<VulkanContext>,
     pub coordinator: Arc<ClusterCoordinator>,
@@ -287,13 +268,11 @@ pub struct AppState {
     pub training_mutex: Arc<Mutex<()>>,
     pub download_state: Arc<RwLock<DownloadState>>,
     pub download_cancel: Arc<RwLock<Option<tokio::sync::watch::Sender<bool>>>>,
-    pub active_inference_model: Arc<RwLock<String>>,
     pub scan_folders: Arc<RwLock<Vec<ScanFolderEntry>>>,
     pub gguf_variants_cache: Arc<RwLock<std::collections::HashMap<String, (Instant, serde_json::Value)>>>,
     pub api_keys: Arc<RwLock<Vec<serde_json::Value>>>,
     /// Постоянное хранилище: история чатов, проекты, настройки, запуски обучения.
     pub store: Arc<crate::store::Store>,
-    pub model_load_progress: Arc<RwLock<LoadProgressState>>,
 }
 
 impl AppState {
@@ -333,12 +312,10 @@ impl AppState {
             training_mutex: Arc::new(Mutex::new(())),
             download_state: Arc::new(RwLock::new(DownloadState::default())),
             download_cancel: Arc::new(RwLock::new(None)),
-            active_inference_model: Arc::new(RwLock::new("llama-3.2-3b-instruct-q4_k_m".to_string())),
             scan_folders: Arc::new(RwLock::new(Vec::new())),
             gguf_variants_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             api_keys: Arc::new(RwLock::new(Vec::new())),
             store,
-            model_load_progress: Arc::new(RwLock::new(LoadProgressState::default())),
         }
     }
 

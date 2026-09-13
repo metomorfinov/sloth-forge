@@ -5,8 +5,9 @@ pub mod cluster;
 pub mod error;
 pub mod handlers;
 pub mod hub;
+pub mod inference_api;
 pub mod locations;
-pub mod models;
+pub mod model_inventory;
 pub mod paths;
 pub mod profile_stats;
 pub mod security;
@@ -58,12 +59,13 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/studio/release-notes", get(api::handle_studio_release_notes))
         .route("/studio/download-transport-capabilities", get(api::handle_studio_download_transport_capabilities))
         // Model Endpoints
-        .route("/models", get(handle_models))
-        .route("/models/list", get(handle_models))
-        .route("/models/local", get(handle_models))
+        // Список моделей и метаданные — из реальных файлов (inference_api.rs, model_inventory.rs)
+        .route("/models", get(inference_api::list_models))
+        .route("/models/list", get(inference_api::list_models))
+        .route("/models/local", get(inference_api::list_local_models))
         .route("/models/cached-model-path", get(api::handle_model_cached_path))
         .route("/models/reveal-cached-model", post(api::handle_model_reveal))
-        .route("/models/kv-cache-estimate", get(api::handle_model_kv_cache_estimate))
+        .route("/models/kv-cache-estimate", get(inference_api::kv_cache_estimate))
         .route("/models/browse-folders", get(api::handle_model_browse_folders))
         .route("/models/checkpoints", get(api::handle_models_checkpoints))
         .route("/models/export-size", get(api::handle_models_export_size))
@@ -132,18 +134,18 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         .route("/train/hardware", get(handle_hardware))
         .route("/train/diffusion/status", get(api::handle_diffusion_status))
         // Chat & Inference Endpoints
-        .route("/inference/status", get(api::handle_inference_status))
+        .route("/inference/status", get(inference_api::inference_status))
         .route("/inference/monitor", get(api::handle_inference_monitor).delete(api::handle_inference_monitor_reset))
-        .route("/inference/load", post(api::handle_inference_load))
-        .route("/inference/unload", post(api::handle_inference_unload))
+        .route("/inference/load", post(inference_api::load_model))
+        .route("/inference/unload", post(inference_api::unload_model))
         .route("/inference/cancel", post(api::handle_inference_cancel))
         .route("/inference/active-generations", get(api::handle_inference_active_generations))
         .route("/inference/audio/stt/status", get(api::handle_inference_audio_stt_status))
         .route("/inference/audio/stt/unload", post(api::handle_inference_audio_stt_unload))
-        .route("/inference/load-progress", get(api::handle_inference_load_progress))
-        .route("/inference/validate", post(api::handle_inference_validate))
-        .route("/inference/llama-flags", get(api::handle_inference_llama_flags))
-        .route("/inference/estimate-memory", post(api::handle_inference_estimate_memory))
+        .route("/inference/load-progress", get(inference_api::load_progress))
+        .route("/inference/validate", post(inference_api::validate_model))
+        .route("/inference/llama-flags", get(inference_api::llama_flags))
+        .route("/inference/estimate-memory", post(inference_api::estimate_memory))
         .route("/inference/video/status", get(api::handle_inference_video_status))
         .route("/inference/images/status", get(api::handle_inference_images_status))
         .route("/inference/chat", post(chat::handle_chat_completions))
@@ -254,7 +256,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<PathBuf>) -> Route
         // Root WebSocket & OpenAI Endpoints
         .route("/ws/telemetry", get(handle_ws_telemetry))
         .route("/v1/chat/completions", post(chat::handle_chat_completions))
-        .route("/v1/models", get(handle_models))
+        .route("/v1/models", get(inference_api::openai_models))
         // /v1/images, /v1/videos, /v1/audio и /openapi.json: JSON с объяснением вместо HTML
         .merge(unavailable::pending_root_routes())
         .layer(cors)
